@@ -1,0 +1,10 @@
+{
+  "name": "cookbookit",
+  "version": "1.0.0",
+  "description": "Recipe generator based on available ingredients",
+  "main": "app.py",
+  "scripts": {
+    "start": "python app.py",
+    "test": "pytest"
+  }
+}

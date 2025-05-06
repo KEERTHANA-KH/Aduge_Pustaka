@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+
+{% block title %}CookBookIt - Meal Plan{% endblock %}
+
+{% block content %}
+<div class="slide-in-up">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h1>Your Meal Plan</h1>
+        <div>
+            <a href="{{ url_for('meal_plan.grocery_list') }}" class="btn btn-outline">Generate Grocery List</a>
+            {% if meal_plans|length > 0 %}
+            <a href="{{ url_for('meal_plan.generate_plan', plan_id=meal_plans[0].id) }}" class="btn btn-primary">Auto-Generate Plan</a>
+            {% endif %}
+        </div>
+    </div>
+    
+    {% if meal_plans|length > 0 %}
+        {% set meal_plan = meal_plans[0] %}
+        <div class="card mb-4">
+            <div class="card-body">
+                <h2>Week of {{ meal_plan.week_start_date.strftime('%B %d, %Y') }}</h2>
+                
+                <div class="meal-plan-grid mt-3">
+                    <!-- Headers - days of week -->
+                    <div></div>
+                    <div class="meal-plan-header">Mon</div>
+                    <div class="meal-plan-header">Tue</div>
+                    <div class="meal-plan-header">Wed</div>
+                    <div class="meal-plan-header">Thu</div>
+                    <div class="meal-plan-header">Fri</div>
+                    <div class="meal-plan-header">Sat</div>
+                    <div class="meal-plan-header">Sun</div>
+                    
+                    <!-- Breakfast row -->
+                    <div class="meal-plan-time">Breakfast</div>
+                    {% for day in range(7) %}
+                        <div class="meal-plan-cell" data-day="{{ day }}">
+                            {% set has_meal = false %}
+                            {% for item in meal_plan.items %}
+                                {% if item.day_of_week == day and item.meal_type == 'breakfast' %}
+                                    {% set has_meal = true %}
+                                    <div class="meal-plan-recipe">
+                                        <a href="{{ url_for('recipe.detail', recipe_id=item.recipe._id) }}">{{ item.recipe.name }}</a>
+                                        <form method="POST" action="{{ url_for('meal_plan.remove_recipe', item_id=item.id) }}" style="display: inline;">
+                                            <button type="submit" class="btn btn-sm btn-danger" style="padding: 0.1rem 0.3rem; font-size: 0.7rem;">×</button>
+                                        </form>
+                                    </div>
+                                {% endif %}
+                            {% endfor %}
+                            
+                            {% if not has_meal %}
+                                <div class="meal-plan-empty">No meal planned</div>
+                                <button class="btn btn-sm btn-outline add-recipe-btn" data-day="{{ day }}" data-meal-type="breakfast">Add</button>
+                            {% endif %}
+                        </div>
+                    {% endfor %}
+                    
+                    <!-- Lunch row -->
+                    <div class="meal-plan-time">Lunch</div>
+                    {% for day in range(7) %}
+                        <div class="meal-plan-cell" data-day="{{ day }}">
+                            {% set has_meal = false %}
+                            {% for item in meal_plan.items %}
+                                {% if item.day_of_week == day and item.meal_type == 'lunch' %}
+                                    {% set has_meal = true %}
+                                    <div class="meal-plan-recipe">
+                                        <a href="{{ url_for('recipe.detail', recipe_id=item.recipe._id) }}">{{ item.recipe.name }}</a>
+                                        <form method="POST" action="{{ url_for('meal_plan.remove_recipe', item_id=item.id) }}" style="display: inline;">
+                                            <button type="submit" class="btn btn-sm btn-danger" style="padding: 0.1rem 0.3rem; font-size: 0.7rem;">×</button>
+                                        </form>
+                                    </div>
+                                {% endif %}
+                            {% endfor %}
+                            
+                            {% if not has_meal %}
+                                <div class="meal-plan-empty">No meal planned</div>
+                                <button class="btn btn-sm btn-outline add-recipe-btn" data-day="{{ day }}" data-meal-type="lunch">Add</button>
+                            {% endif %}
+                        </div>
+                    {% endfor %}
+                    
+                    <!-- Dinner row -->
+                    <div class="meal-plan-time">Dinner</div>
+                    {% for day in range(7) %}
+                        <div class="meal-plan-cell" data-day="{{ day }}">
+                            {% set has_meal = false %}
+                            {% for item in meal_plan.items %}
+                                {% if item.day_of_week == day and item.meal_type == 'dinner' %}
+                                    {% set has_meal = true %}
+                                    <div class="meal-plan-recipe">
+                                        <a href="{{ url_for('recipe.detail', recipe_id=item.recipe._id) }}">{{ item.recipe.name }}</a>
+                                        <form method="POST" action="{{ url_for('meal_plan.remove_recipe', item_id=item.id) }}" style="display: inline;">
+                                            <button type="submit" class="btn btn-sm btn-danger" style="padding: 0.1rem 0.3rem; font-size: 0.7rem;">×</button>
+                                        </form>
+                                    </div>
+                                {% endif %}
+                            {% endfor %}
+                            
+                            {% if not has_meal %}
+                                <div class="meal-plan-empty">No meal planned</div>
+                                <button class="btn btn-sm btn-outline add-recipe-btn" data-day="{{ day }}" data-meal-type="dinner">Add</button>
+                            {% endif %}
+                        </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    {% else %}
+        <div class="alert alert-info">
+            <h4>No meal plan found for this week</h4>
+            <p>Create a new meal plan to get started.</p>
+        </div>
+    {% endif %}
+    
+    {% if recipe_suggestions|length > 0 %}
+        <h2 class="mb-3">Suggested Recipes</h2>
+        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.5rem;">
+            {% for recipe in recipe_suggestions %}
+                <div class="recipe-card card">
+                    <img src="{{ recipe.image_url or 'https://images.pexels.com/photos/1640774/pexels-photo-1640774.jpeg' }}" alt="{{ recipe.name }}" class="card-img">
+                    <div class="card-body">
+                        <h3 class="card-title">{{ recipe.name }}</h3>
+                        <p class="card-text">{{ recipe.description }}</p>
+                        <div class="recipe-meta">
+                            <span>{{ recipe.prep_time + recipe.cook_time }} mins</span>
+                            <span>{{ recipe.difficulty }}</span>
+                        </div>
+                        <div class="match-indicator">
+                            <div class="match-bar" data-percentage="{{ recipe.match_percentage or 0 }}">
+                                <div class="match-progress" style="width: 0%"></div>
+                            </div>
+                            <span class="match-text">{{ recipe.match_percentage|round|int }}%</span>
+                        </div>
+                        <a href="{{ url_for('recipe.detail', recipe_id=recipe._id) }}" class="btn btn-primary mt-2">View Recipe</a>
+                    </div>
+                </div>
+            {% endfor %}
+        </div>
+    {% endif %}
+    
+    <!-- Add Recipe Modal -->
+    <div id="meal-plan-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); z-index: 1000; justify-content: center; align-items: center; opacity: 0; transition: opacity 0.3s;">
+        <div class="card" style="width: 100%; max-width: 500px; transform: translateY(20px); transition: transform 0.3s;">
+            <div class="card-body">
+                <h2>Add Recipe to Meal Plan</h2>
+                
+                <form method="POST" action="{{ url_for('meal_plan.add_recipe') }}">
+                    {% if meal_plans|length > 0 %}
+                        <input type="hidden" name="plan_id" value="{{ meal_plans[0].id }}">
+                    {% endif %}
+                    <input type="hidden" id="day_of_week" name="day_of_week" value="0">
+                    <input type="hidden" id="meal_type" name="meal_type" value="breakfast">
+                    
+                    <div class="form-group">
+                        <label for="recipe_id" class="form-label">Select Recipe</label>
+                        <select id="recipe_id" name="recipe_id" class="form-select">
+                            {% for recipe in recipe_suggestions %}
+                                <option value="{{ recipe._id }}">{{ recipe.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    
+                    <div class="d-flex justify-content-between mt-4">
+                        <button type="button" id="close-meal-plan-modal" class="btn btn-outline">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Add to Meal Plan</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

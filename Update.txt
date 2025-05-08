@@ -1,0 +1,2832 @@
+from database.mongo_setup import mongo_db
+from bson.objectid import ObjectId
+import os
+from flask import current_app
+
+print(f"Mongo DB connected: {mongo_db is not None}")
+
+class Recipe:
+    @staticmethod
+    def get_image_path(recipe_id, image_url=None):
+        """Return the local path to a recipe image or use placeholder if it doesn't exist"""
+        # First try using recipe ID-based filename
+        local_path = f"images/recipes/{recipe_id}.jpg"
+        full_path = os.path.join(current_app.static_folder, local_path)
+        
+        if os.path.exists(full_path):
+            return local_path
+        
+        # Fall back to placeholder
+        return "images/placeholder.jpg"
+        
+    @staticmethod
+    def get_all():
+        return list(mongo_db.recipes.find())
+    
+    @staticmethod
+    def get_by_id(recipe_id):
+        try:
+            return mongo_db.recipes.find_one({"_id": ObjectId(recipe_id)})
+        except:
+            return None
+    
+    @staticmethod
+    def search_by_ingredients(ingredients_list, exclude_ingredients=None):
+        """
+        Search for recipes that can be made with the given ingredients
+        
+        Args:
+            ingredients_list (list): List of ingredients names
+            exclude_ingredients (list, optional): List of ingredients to exclude
+            
+        Returns:
+            list: List of recipes that can be made with the given ingredients
+        """
+        if not ingredients_list:
+            return []
+        
+        # Create query to match recipes with ingredients from the list
+        query = {
+            "ingredients.name": {
+                "$in": ingredients_list
+            }
+        }
+        
+        # Add exclusion if provided
+        if exclude_ingredients:
+            query["ingredients.name"] = {
+                "$nin": exclude_ingredients
+            }
+        
+        # Find recipes and calculate match percentage
+        recipes = list(mongo_db.recipes.find(query))
+        
+        # Calculate match percentage for each recipe
+        for recipe in recipes:
+            total_ingredients = len(recipe["ingredients"])
+            matching_ingredients = sum(1 for i in recipe["ingredients"] if i["name"] in ingredients_list)
+            recipe["match_percentage"] = (matching_ingredients / total_ingredients) * 100
+        
+        # Sort by match percentage (highest first)
+        recipes.sort(key=lambda x: x.get("match_percentage", 0), reverse=True)
+        
+        return recipes
+    
+    @staticmethod
+    def filter_by_dietary(recipes, dietary_filters):
+        """
+        Filter recipes based on dietary preferences
+        
+        Args:
+            recipes (list): List of recipes to filter
+            dietary_filters (dict): Dictionary of dietary filters
+            
+        Returns:
+            list: Filtered list of recipes
+        """
+        if not dietary_filters:
+            return recipes
+        
+        filtered_recipes = []
+        
+        for recipe in recipes:
+            # Check if recipe matches all dietary filters
+            matches_all = True
+            
+            for key, value in dietary_filters.items():
+                if value and recipe.get("dietary_info", {}).get(key) != value:
+                    matches_all = False
+                    break
+            
+            if matches_all:
+                filtered_recipes.append(recipe)
+        
+        return filtered_recipes
+    
+    @staticmethod
+    def filter_by_time(recipes, max_time):
+        """
+        Filter recipes by maximum time
+        
+        Args:
+            recipes (list): List of recipes to filter
+            max_time (int): Maximum total time in minutes
+            
+        Returns:
+            list: Filtered list of recipes
+        """
+        if not max_time:
+            return recipes
+        
+        return [r for r in recipes if (r.get('prep_time', 0) + r.get('cook_time', 0)) <= max_time]
+    
+    @staticmethod
+    def filter_by_difficulty(recipes, difficulty):
+        """
+        Filter recipes by difficulty level
+        
+        Args:
+            recipes (list): List of recipes to filter
+            difficulty (str): Difficulty level ('Easy', 'Medium', 'Hard')
+            
+        Returns:
+            list: Filtered list of recipes
+        """
+        if not difficulty:
+            return recipes
+        
+        return [r for r in recipes if r.get('difficulty') == difficulty]
+    
+    @staticmethod
+    def search_by_name(search_term):
+        """
+        Search for recipes by name
+        
+        Args:
+            search_term (str): Term to search for
+            
+        Returns:
+            list: List of recipes matching the search term
+        """
+        if not search_term:
+            return []
+        
+        # Create text index if it doesn't exist
+        if "name_text" not in mongo_db.recipes.index_information():
+            mongo_db.recipes.create_index([("name", "text"), ("description", "text")])
+        
+        return list(mongo_db.recipes.find({"$text": {"$search": search_term}}))
+    
+    @staticmethod
+    def get_recipe_ingredients(recipe_id):
+        """
+        Get ingredients for a specific recipe
+        
+        Args:
+            recipe_id (str): Recipe ID
+            
+        Returns:
+            list: List of ingredients for the recipe
+        """
+        recipe = Recipe.get_by_id(recipe_id)
+        if not recipe:
+            return []
+        
+        return recipe.get("ingredients", [])
+*********
+from database.mysql_setup import get_connection
+from datetime import datetime, timedelta
+from config import Config
+from database.mongo_setup import mongo_db
+import pymongo
+
+class Inventory:
+    def __init__(self, id, user_id, ingredient_name, category, quantity, unit, expiry_date=None, added_date=None, ingredient_id=None):
+        self.id = id
+        self.user_id = user_id
+        self.ingredient_name = ingredient_name
+        self.category = category
+        self.quantity = quantity
+        self.unit = unit
+        self.expiry_date = expiry_date
+        self.added_date = added_date
+        self.ingredient_id = ingredient_id
+    
+    @staticmethod
+    def get_by_user_id(user_id):
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        cursor.execute(
+            "SELECT * FROM inventory WHERE user_id = %s ORDER BY ingredient_name",
+            (user_id,)
+        )
+        
+        inventory_items = []
+        for item in cursor.fetchall():
+            inventory_items.append(Inventory(
+                id=item['id'],
+                user_id=item['user_id'],
+                ingredient_name=item['ingredient_name'],
+                category=item['category'],
+                quantity=item['quantity'],
+                unit=item['unit'],
+                expiry_date=item['expiry_date'],
+                added_date=item['added_date'],
+                ingredient_id=item.get('ingredient_id')
+            ))
+        
+        cursor.close()
+        return inventory_items
+    
+    @staticmethod
+    def get_by_id(item_id):
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        cursor.execute("SELECT * FROM inventory WHERE id = %s", (item_id,))
+        item = cursor.fetchone()
+        cursor.close()
+        
+        if not item:
+            return None
+        
+        return Inventory(
+            id=item['id'],
+            user_id=item['user_id'],
+            ingredient_name=item['ingredient_name'],
+            category=item['category'],
+            quantity=item['quantity'],
+            unit=item['unit'],
+            expiry_date=item['expiry_date'],
+            added_date=item['added_date'],
+            ingredient_id=item.get('ingredient_id')
+        )
+    
+    @staticmethod
+    def get_ingredient_id(ingredient_name):
+        """Get MongoDB ObjectID for an ingredient by name"""
+        # Search for the ingredient in the recipes collection
+        ingredient_name = ingredient_name.lower()
+        results = mongo_db.recipes.aggregate([
+            {"$unwind": "$ingredients"},
+            {"$match": {"ingredients.name": ingredient_name}},
+            {"$limit": 1}
+        ])
+        
+        results_list = list(results)
+        if results_list:
+            # Return the MongoDB ObjectID as a string
+            return str(results_list[0]['_id'])
+        
+        return None
+    
+    @staticmethod
+    def get_ingredient_unit(ingredient_name):
+        """Get standard unit for an ingredient by name"""
+        ingredient_name = ingredient_name.lower()
+        results = mongo_db.recipes.aggregate([
+            {"$unwind": "$ingredients"},
+            {"$match": {"ingredients.name": ingredient_name}},
+            {"$limit": 1}
+        ])
+        
+        results_list = list(results)
+        if results_list:
+            # Return the unit
+            return results_list[0]['ingredients']['unit']
+        
+        return None
+    
+    @staticmethod
+    def add_item(user_id, ingredient_name, category, quantity, unit, expiry_date=None):
+        # First check if the ingredient exists in MongoDB
+        ingredient_id = Inventory.get_ingredient_id(ingredient_name)
+        
+        if not ingredient_id:
+            return None  # Ingredient not found in MongoDB
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Check if table has ingredient_id column
+            cursor.execute("SHOW COLUMNS FROM inventory LIKE 'ingredient_id'")
+            has_ingredient_id = cursor.fetchone() is not None
+            
+            if has_ingredient_id:
+                cursor.execute(
+                    """
+                    INSERT INTO inventory 
+                    (user_id, ingredient_name, category, quantity, unit, expiry_date, ingredient_id) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (user_id, ingredient_name, category, quantity, unit, expiry_date, ingredient_id)
+                )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO inventory 
+                    (user_id, ingredient_name, category, quantity, unit, expiry_date) 
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (user_id, ingredient_name, category, quantity, unit, expiry_date)
+                )
+                
+            conn.commit()
+            item_id = cursor.lastrowid
+            cursor.close()
+            
+            return Inventory.get_by_id(item_id)
+        except Exception as e:
+            conn.rollback()
+            cursor.close()
+            print(f"Error adding inventory item: {e}")
+            return None
+    
+    @staticmethod
+    def update_item(item_id, ingredient_name, category, quantity, unit, expiry_date=None):
+        # First check if the ingredient exists in MongoDB
+        ingredient_id = Inventory.get_ingredient_id(ingredient_name)
+        
+        if not ingredient_id:
+            return None  # Ingredient not found in MongoDB
+            
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Check if table has ingredient_id column
+            cursor.execute("SHOW COLUMNS FROM inventory LIKE 'ingredient_id'")
+            has_ingredient_id = cursor.fetchone() is not None
+            
+            if has_ingredient_id:
+                cursor.execute(
+                    """
+                    UPDATE inventory 
+                    SET ingredient_name = %s, category = %s, quantity = %s, unit = %s, expiry_date = %s, ingredient_id = %s
+                    WHERE id = %s
+                    """,
+                    (ingredient_name, category, quantity, unit, expiry_date, ingredient_id, item_id)
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE inventory 
+                    SET ingredient_name = %s, category = %s, quantity = %s, unit = %s, expiry_date = %s
+                    WHERE id = %s
+                    """,
+                    (ingredient_name, category, quantity, unit, expiry_date, item_id)
+                )
+                
+            conn.commit()
+            cursor.close()
+            
+            return Inventory.get_by_id(item_id)
+        except Exception as e:
+            conn.rollback()
+            cursor.close()
+            print(f"Error updating inventory item: {e}")
+            return None
+    
+    @staticmethod
+    def delete_item(item_id):
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("DELETE FROM inventory WHERE id = %s", (item_id,))
+            conn.commit()
+            cursor.close()
+            return True
+        except Exception as e:
+            conn.rollback()
+            cursor.close()
+            print(f"Error deleting inventory item: {e}")
+            return False
+    
+    @staticmethod
+    def get_expiring_items(user_id):
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        warning_date = datetime.now().date() + timedelta(days=Config.EXPIRATION_WARNING_DAYS)
+        
+        cursor.execute(
+            """
+            SELECT * FROM inventory 
+            WHERE user_id = %s AND expiry_date IS NOT NULL AND expiry_date <= %s
+            ORDER BY expiry_date
+            """,
+            (user_id, warning_date)
+        )
+        
+        expiring_items = []
+        for item in cursor.fetchall():
+            expiring_items.append(Inventory(
+                id=item['id'],
+                user_id=item['user_id'],
+                ingredient_name=item['ingredient_name'],
+                category=item['category'],
+                quantity=item['quantity'],
+                unit=item['unit'],
+                expiry_date=item['expiry_date'],
+                added_date=item['added_date'],
+                ingredient_id=item.get('ingredient_id')
+            ))
+        
+        cursor.close()
+        return expiring_items
+    
+    @staticmethod
+    def update_quantity(user_id, ingredient_name, quantity_change):
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # First check if the ingredient exists for this user
+            cursor.execute(
+                "SELECT id, quantity, unit FROM inventory WHERE user_id = %s AND ingredient_name = %s",
+                (user_id, ingredient_name)
+            )
+            
+            item = cursor.fetchone()
+            
+            if item:
+                item_id, current_quantity, unit = item
+                new_quantity = current_quantity + quantity_change
+                
+                # If new quantity is 0 or less, delete the item
+                if new_quantity <= 0:
+                    cursor.execute("DELETE FROM inventory WHERE id = %s", (item_id,))
+                else:
+                    cursor.execute(
+                        "UPDATE inventory SET quantity = %s WHERE id = %s",
+                        (new_quantity, item_id)
+                    )
+                
+                conn.commit()
+                cursor.close()
+                return True
+            else:
+                cursor.close()
+                return False
+        except Exception as e:
+            conn.rollback()
+            cursor.close()
+            print(f"Error updating inventory quantity: {e}")
+            return False
+
+    @staticmethod
+    def convert_units(from_value, from_unit, to_unit):
+        """
+        Convert between compatible units
+        This is a basic implementation - for a production app, this would be more comprehensive
+        """
+        # Basic conversions for demonstration
+        mass_conversions = {
+            'g': 1,
+            'kg': 1000,
+            'oz': 28.35,
+            'lb': 453.59
+        }
+        
+        volume_conversions = {
+            'ml': 1,
+            'l': 1000,
+            'cups': 240,
+            'tbsp': 15,
+            'tsp': 5,
+        }
+        
+        # Check if both units are in the same conversion group
+        if from_unit in mass_conversions and to_unit in mass_conversions:
+            # Convert to base unit (g) and then to target unit
+            base_value = from_value * mass_conversions[from_unit]
+            return base_value / mass_conversions[to_unit]
+        
+        elif from_unit in volume_conversions and to_unit in volume_conversions:
+            # Convert to base unit (ml) and then to target unit
+            base_value = from_value * volume_conversions[from_unit]
+            return base_value / volume_conversions[to_unit]
+        
+        # If units are not compatible or not in our conversion tables, return None
+        return None
+***********
+import mysql.connector
+from mysql.connector import Error
+from config import Config
+
+mysql_connection = None
+
+def init_mysql(app):
+    global mysql_connection
+    try:
+        mysql_connection = mysql.connector.connect(
+            host=app.config['MYSQL_HOST'],
+            user=app.config['MYSQL_USER'],
+            password=app.config['MYSQL_PASSWORD']
+        )
+        
+        # Create database if it doesn't exist
+        cursor = mysql_connection.cursor()
+        cursor.execute(f"CREATE DATABASE IF NOT EXISTS {app.config['MYSQL_DB']}")
+        cursor.execute(f"USE {app.config['MYSQL_DB']}")
+        cursor.close()
+        
+        return mysql_connection
+    except Error as e:
+        print(f"Error connecting to MySQL: {e}")
+        return None
+
+def get_connection():
+    global mysql_connection
+    if mysql_connection is None or not mysql_connection.is_connected():
+        mysql_connection = mysql.connector.connect(
+            host=Config.MYSQL_HOST,
+            user=Config.MYSQL_USER,
+            password=Config.MYSQL_PASSWORD,
+            database=Config.MYSQL_DB
+        )
+    return mysql_connection
+
+def create_tables():
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # Create Users table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        username VARCHAR(100) NOT NULL UNIQUE,
+        email VARCHAR(100) NOT NULL UNIQUE,
+        password VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+    
+    # Create Inventory table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS inventory (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        ingredient_name VARCHAR(100) NOT NULL,
+        category VARCHAR(50) NOT NULL,
+        quantity FLOAT NOT NULL,
+        unit VARCHAR(20) NOT NULL,
+        expiry_date DATE,
+        added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+    """)
+    
+    # Check if ingredient_id column exists, if not add it
+    cursor.execute("SHOW COLUMNS FROM inventory LIKE 'ingredient_id'")
+    if not cursor.fetchone():
+        cursor.execute("""
+        ALTER TABLE inventory ADD COLUMN ingredient_id VARCHAR(24)
+        """)
+    
+    # Create User Preferences table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS user_preferences (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL UNIQUE,
+        is_vegetarian BOOLEAN DEFAULT FALSE,
+        is_vegan BOOLEAN DEFAULT FALSE,
+        is_gluten_free BOOLEAN DEFAULT FALSE,
+        is_dairy_free BOOLEAN DEFAULT FALSE,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+    """)
+    
+    # Create Meal Plans table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS meal_plans (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        week_start_date DATE NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+    """)
+    
+    # Create Meal Plan Items table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS meal_plan_items (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        meal_plan_id INT NOT NULL,
+        recipe_id VARCHAR(24) NOT NULL, 
+        day_of_week INT NOT NULL, 
+        meal_type VARCHAR(20) NOT NULL,
+        FOREIGN KEY (meal_plan_id) REFERENCES meal_plans(id) ON DELETE CASCADE
+    )
+    """)
+    
+    # Create Completed Recipes table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS completed_recipes (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        recipe_id VARCHAR(24) NOT NULL,
+        completed_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        servings_made INT NOT NULL DEFAULT 1,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+    """)
+    
+    conn.commit()
+    cursor.close()
+*********
+from flask import Blueprint, render_template, redirect, url_for, request, flash, jsonify
+from flask_login import login_required, current_user
+from models.inventory import Inventory
+from datetime import datetime
+from flask_wtf import FlaskForm
+from wtforms import StringField, FloatField, SelectField, DateField, SubmitField
+from wtforms.validators import DataRequired, Optional
+from database.mongo_setup import mongo_db
+
+inventory_bp = Blueprint('inventory', __name__, url_prefix='/inventory')
+
+# Categories for the form dropdown
+CATEGORIES = [
+    ('vegetable', 'Vegetable'),
+    ('fruit', 'Fruit'),
+    ('meat', 'Meat'),
+    ('dairy', 'Dairy'),
+    ('grain', 'Grain'),
+    ('spice', 'Spice'),
+    ('condiment', 'Condiment'),
+    ('bakery', 'Bakery'),
+    ('canned goods', 'Canned Goods'),
+    ('frozen', 'Frozen'),
+    ('beverage', 'Beverage'),
+    ('snack', 'Snack'),
+    ('other', 'Other')
+]
+
+# Units for the form dropdown
+UNITS = [
+    ('g', 'Grams (g)'),
+    ('kg', 'Kilograms (kg)'),
+    ('ml', 'Milliliters (ml)'),
+    ('l', 'Liters (l)'),
+    ('cups', 'Cups'),
+    ('tbsp', 'Tablespoons'),
+    ('tsp', 'Teaspoons'),
+    ('whole', 'Whole'),
+    ('slices', 'Slices'),
+    ('pieces', 'Pieces'),
+    ('pinch', 'Pinch'),
+    ('oz', 'Ounces (oz)'),
+    ('lb', 'Pounds (lb)'),
+    ('cloves', 'Cloves')
+]
+
+class InventoryForm(FlaskForm):
+    ingredient_name = StringField('Ingredient Name', validators=[DataRequired()])
+    category = SelectField('Category', choices=CATEGORIES, validators=[DataRequired()])
+    quantity = FloatField('Quantity', validators=[DataRequired()])
+    unit = SelectField('Unit', choices=UNITS, validators=[DataRequired()])
+    expiry_date = DateField('Expiry Date (Optional)', format='%Y-%m-%d', validators=[Optional()])
+    submit = SubmitField('Save')
+
+@inventory_bp.route('/')
+@login_required
+def index():
+    inventory_items = Inventory.get_by_user_id(current_user.id)
+    expiring_items = Inventory.get_expiring_items(current_user.id)
+    return render_template('inventory/index.html', 
+                          inventory_items=inventory_items, 
+                          expiring_items=expiring_items,
+                          categories=CATEGORIES,
+                          datetime=datetime)
+
+@inventory_bp.route('/add', methods=['GET', 'POST'])
+@login_required
+def add():
+    form = InventoryForm()
+    
+    if form.validate_on_submit():
+        ingredient_name = form.ingredient_name.data.lower()
+        
+        # Validate that ingredient exists in MongoDB
+        ingredient_id = Inventory.get_ingredient_id(ingredient_name)
+        if not ingredient_id:
+            flash('This ingredient is not in our database. Please check the spelling or try another ingredient.', 'danger')
+            return render_template('inventory/add.html', form=form, title="Add Ingredient")
+        
+        item = Inventory.add_item(
+            user_id=current_user.id,
+            ingredient_name=ingredient_name,
+            category=form.category.data,
+            quantity=form.quantity.data,
+            unit=form.unit.data,
+            expiry_date=form.expiry_date.data
+        )
+        
+        if item:
+            flash('Ingredient added to inventory!', 'success')
+            return redirect(url_for('inventory.index'))
+        else:
+            flash('Error adding ingredient. Please try again.', 'danger')
+    
+    return render_template('inventory/add.html', form=form, title="Add Ingredient")
+
+@inventory_bp.route('/edit/<int:item_id>', methods=['GET', 'POST'])
+@login_required
+def edit(item_id):
+    item = Inventory.get_by_id(item_id)
+    
+    if not item or item.user_id != current_user.id:
+        flash('Item not found or you do not have permission to edit it.', 'danger')
+        return redirect(url_for('inventory.index'))
+    
+    form = InventoryForm()
+    
+    if form.validate_on_submit():
+        ingredient_name = form.ingredient_name.data.lower()
+        
+        # Validate that ingredient exists in MongoDB
+        ingredient_id = Inventory.get_ingredient_id(ingredient_name)
+        if not ingredient_id:
+            flash('This ingredient is not in our database. Please check the spelling or try another ingredient.', 'danger')
+            return render_template('inventory/edit.html', form=form, item=item, title="Edit Ingredient")
+            
+        updated_item = Inventory.update_item(
+            item_id=item_id,
+            ingredient_name=ingredient_name,
+            category=form.category.data,
+            quantity=form.quantity.data,
+            unit=form.unit.data,
+            expiry_date=form.expiry_date.data
+        )
+        
+        if updated_item:
+            flash('Ingredient updated successfully!', 'success')
+            return redirect(url_for('inventory.index'))
+        else:
+            flash('Error updating ingredient. Please try again.', 'danger')
+    
+    # Pre-fill form
+    if request.method == 'GET':
+        form.ingredient_name.data = item.ingredient_name
+        form.category.data = item.category
+        form.quantity.data = item.quantity
+        form.unit.data = item.unit
+        form.expiry_date.data = item.expiry_date
+    
+    return render_template('inventory/edit.html', form=form, item=item, title="Edit Ingredient")
+
+@inventory_bp.route('/delete/<int:item_id>', methods=['POST'])
+@login_required
+def delete(item_id):
+    item = Inventory.get_by_id(item_id)
+    
+    if not item or item.user_id != current_user.id:
+        flash('Item not found or you do not have permission to delete it.', 'danger')
+        return redirect(url_for('inventory.index'))
+    
+    if Inventory.delete_item(item_id):
+        flash('Ingredient removed from inventory!', 'success')
+    else:
+        flash('Error removing ingredient. Please try again.', 'danger')
+    
+    return redirect(url_for('inventory.index'))
+
+@inventory_bp.route('/api/items', methods=['GET'])
+@login_required
+def api_get_items():
+    inventory_items = Inventory.get_by_user_id(current_user.id)
+    items_list = []
+    
+    for item in inventory_items:
+        items_list.append({
+            'id': item.id,
+            'ingredient_name': item.ingredient_name,
+            'category': item.category,
+            'quantity': item.quantity,
+            'unit': item.unit,
+            'expiry_date': item.expiry_date.isoformat() if item.expiry_date else None
+        })
+    
+    return jsonify({'items': items_list})
+
+@inventory_bp.route('/api/ingredients', methods=['GET'])
+@login_required
+def api_get_ingredients():
+    search_term = request.args.get('term', '').lower()
+    
+    # Get ingredients from MongoDB
+    # Create a list of unique ingredients
+    unique_ingredients = []
+    
+    # Get ingredients from recipes collection
+    pipeline = [
+        {"$unwind": "$ingredients"},
+        {"$group": {
+            "_id": "$ingredients.name",
+            "unit": {"$first": "$ingredients.unit"}
+        }},
+        {"$sort": {"_id": 1}}
+    ]
+    
+    if search_term:
+        pipeline.insert(1, {"$match": {"ingredients.name": {"$regex": f"^{search_term}"}}})
+    
+    ingredients = mongo_db.recipes.aggregate(pipeline)
+    
+    for ingredient in ingredients:
+        unique_ingredients.append({
+            'name': ingredient['_id'],
+            'unit': ingredient['unit']
+        })
+    
+    return jsonify({'ingredients': unique_ingredients})
+********
+from flask import Blueprint, render_template, redirect, url_for, request, flash
+from flask_login import login_user, logout_user, login_required, current_user
+from models.user import User
+from flask_wtf import FlaskForm
+from wtforms import StringField, PasswordField, SubmitField, BooleanField
+from wtforms.validators import DataRequired, Email, EqualTo, Length, ValidationError
+from database.mysql_setup import get_connection
+import bcrypt
+from datetime import datetime
+
+auth_bp = Blueprint('auth', __name__)
+
+class RegisterForm(FlaskForm):
+    username = StringField('Username', validators=[DataRequired(), Length(min=3, max=80)])
+    email = StringField('Email', validators=[DataRequired(), Email()])
+    password = PasswordField('Password', validators=[DataRequired(), Length(min=6)])
+    confirm_password = PasswordField('Confirm Password', validators=[DataRequired(), EqualTo('password')])
+    submit = SubmitField('Register')
+    
+    def validate_email(self, email):
+        user = User.get_by_email(email.data)
+        if user:
+            raise ValidationError('Email already registered. Please use a different email.')
+
+class LoginForm(FlaskForm):
+    email = StringField('Email', validators=[DataRequired(), Email()])
+    password = PasswordField('Password', validators=[DataRequired()])
+    remember = BooleanField('Remember Me')
+    submit = SubmitField('Login')
+
+class PasswordForm(FlaskForm):
+    current_password = PasswordField('Current Password', validators=[DataRequired()])
+    new_password = PasswordField('New Password', validators=[DataRequired(), Length(min=6)])
+    confirm_password = PasswordField('Confirm New Password', validators=[DataRequired(), EqualTo('new_password')])
+    submit = SubmitField('Update Password')
+
+@auth_bp.route('/register', methods=['GET', 'POST'])
+def register():
+    if current_user.is_authenticated:
+        return redirect(url_for('index'))
+    
+    form = RegisterForm()
+    
+    if form.validate_on_submit():
+        user = User.create(
+            username=form.username.data,
+            email=form.email.data,
+            password=form.password.data
+        )
+        
+        if user:
+            flash('Your account has been created! You can now log in.', 'success')
+            return redirect(url_for('auth.login'))
+        else:
+            flash('An error occurred while creating your account. Please try again.', 'danger')
+    
+    return render_template('auth/register.html', form=form)
+
+@auth_bp.route('/login', methods=['GET', 'POST'])
+def login():
+    if current_user.is_authenticated:
+        return redirect(url_for('index'))
+    
+    form = LoginForm()
+    
+    if form.validate_on_submit():
+        user = User.get_by_email(form.email.data)
+        
+        if user and User.verify_password(user, form.password.data):
+            login_user(user, remember=form.remember.data)
+            next_page = request.args.get('next')
+            return redirect(next_page if next_page else url_for('index'))
+        else:
+            flash('Login unsuccessful. Please check your email and password.', 'danger')
+    
+    return render_template('auth/login.html', form=form)
+
+@auth_bp.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for('index'))
+
+@auth_bp.route('/profile')
+@login_required
+def profile():
+    # Get user preferences
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    
+    # Get user preferences
+    cursor.execute("SELECT * FROM user_preferences WHERE user_id = %s", (current_user.id,))
+    preferences = cursor.fetchone()
+    
+    # Get user registration date
+    cursor.execute("SELECT created_at FROM users WHERE id = %s", (current_user.id,))
+    user_data = cursor.fetchone()
+    cursor.close()
+    
+    member_since = user_data.get('created_at') if user_data else datetime.now()
+    
+    return render_template('auth/profile.html', 
+                          preferences=preferences,
+                          member_since=member_since)
+
+@auth_bp.route('/update_preferences', methods=['POST'])
+@login_required
+def update_preferences():
+    vegetarian = request.form.get('vegetarian') == 'on'
+    vegan = request.form.get('vegan') == 'on'
+    gluten_free = request.form.get('gluten_free') == 'on'
+    dairy_free = request.form.get('dairy_free') == 'on'
+    
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute(
+            """
+            UPDATE user_preferences 
+            SET is_vegetarian = %s, is_vegan = %s, is_gluten_free = %s, is_dairy_free = %s
+            WHERE user_id = %s
+            """,
+            (vegetarian, vegan, gluten_free, dairy_free, current_user.id)
+        )
+        conn.commit()
+        flash('Your dietary preferences have been updated.', 'success')
+    except Exception as e:
+        conn.rollback()
+        flash(f'An error occurred: {e}', 'danger')
+    finally:
+        cursor.close()
+    
+    return redirect(url_for('auth.profile'))
+
+@auth_bp.route('/change_password', methods=['GET', 'POST'])
+@login_required
+def change_password():
+    form = PasswordForm()
+    
+    if form.validate_on_submit():
+        # Get current user with password
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT password FROM users WHERE id = %s", (current_user.id,))
+        user_data = cursor.fetchone()
+        
+        if not user_data:
+            flash('User not found.', 'danger')
+            return redirect(url_for('auth.profile'))
+        
+        # Verify current password
+        if not bcrypt.checkpw(form.current_password.data.encode('utf-8'), user_data['password'].encode('utf-8')):
+            flash('Current password is incorrect.', 'danger')
+            return render_template('auth/change_password.html', form=form)
+        
+        # Update password
+        try:
+            hashed_password = bcrypt.hashpw(form.new_password.data.encode('utf-8'), bcrypt.gensalt())
+            cursor.execute(
+                "UPDATE users SET password = %s WHERE id = %s",
+                (hashed_password.decode('utf-8'), current_user.id)
+            )
+            conn.commit()
+            flash('Your password has been updated.', 'success')
+            return redirect(url_for('auth.profile'))
+        except Exception as e:
+            conn.rollback()
+            flash(f'An error occurred: {e}', 'danger')
+        finally:
+            cursor.close()
+    
+    return render_template('auth/change_password.html', form=form)
+
+@auth_bp.route('/delete_account', methods=['GET', 'POST'])
+@login_required
+def delete_account():
+    if request.method == 'POST':
+        password = request.form.get('password')
+        
+        # Get current user with password
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT password FROM users WHERE id = %s", (current_user.id,))
+        user_data = cursor.fetchone()
+        
+        if not user_data:
+            flash('User not found.', 'danger')
+            return redirect(url_for('auth.profile'))
+        
+        # Verify password
+        if not bcrypt.checkpw(password.encode('utf-8'), user_data['password'].encode('utf-8')):
+            flash('Password is incorrect.', 'danger')
+            return render_template('auth/delete_account.html')
+        
+        # Delete user account (all related data will be deleted due to foreign key constraints)
+        try:
+            cursor.execute("DELETE FROM users WHERE id = %s", (current_user.id,))
+            conn.commit()
+            logout_user()
+            flash('Your account has been deleted.', 'success')
+            return redirect(url_for('index'))
+        except Exception as e:
+            conn.rollback()
+            flash(f'An error occurred: {e}', 'danger')
+        finally:
+            cursor.close()
+    
+    return render_template('auth/delete_account.html')
+**********
+from flask import Blueprint, render_template, redirect, url_for, request, flash, jsonify
+from flask_login import login_required, current_user
+from models.recipe import Recipe
+from models.inventory import Inventory
+from models.completed_recipe import CompletedRecipe
+from database.mysql_setup import get_connection
+
+recipe_bp = Blueprint('recipe', __name__, url_prefix='/recipe')
+
+@recipe_bp.route('/')
+@login_required
+def index():
+    # Get user's inventory ingredients
+    inventory_items = Inventory.get_by_user_id(current_user.id)
+    ingredient_names = [item.ingredient_name for item in inventory_items]
+    
+    # Get recipes that can be made with these ingredients
+    recipes = Recipe.search_by_ingredients(ingredient_names)
+    
+    # Get user's dietary preferences
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM user_preferences WHERE user_id = %s", (current_user.id,))
+    preferences = cursor.fetchone()
+    cursor.close()
+    
+    # Apply dietary filters if user has preferences
+    if preferences:
+        dietary_filters = {
+            'vegetarian': preferences['is_vegetarian'],
+            'vegan': preferences['is_vegan'],
+            'gluten_free': preferences['is_gluten_free'],
+            'dairy_free': preferences['is_dairy_free']
+        }
+        # Only apply filters that are true
+        active_filters = {k: v for k, v in dietary_filters.items() if v}
+        
+        if active_filters:
+            recipes = Recipe.filter_by_dietary(recipes, active_filters)
+    
+    # Get recently completed recipes
+    completed_recipes = CompletedRecipe.get_by_user(current_user.id, limit=5)
+    
+    return render_template('recipe/index.html', 
+                          recipes=recipes, 
+                          completed_recipes=completed_recipes,
+                          inventory_count=len(inventory_items))
+
+@recipe_bp.route('/search', methods=['GET', 'POST'])
+@login_required
+def search():
+    search_term = request.args.get('term', '')
+    
+    # Get all filter parameters
+    vegetarian = request.args.get('vegetarian') == 'on'
+    vegan = request.args.get('vegan') == 'on'
+    gluten_free = request.args.get('gluten_free') == 'on'
+    dairy_free = request.args.get('dairy_free') == 'on'
+    
+    # Time filter
+    max_time = request.args.get('max_time')
+    if max_time and max_time.isdigit():
+        max_time = int(max_time)
+    else:
+        max_time = None
+    
+    # Difficulty filter
+    difficulty = request.args.get('difficulty')
+    if difficulty not in ['Easy', 'Medium', 'Hard']:
+        difficulty = None
+    
+    if search_term:
+        recipes = Recipe.search_by_name(search_term)
+    else:
+        recipes = Recipe.get_all()
+    
+    # Create dietary filters dict
+    dietary_filters = {}
+    if vegetarian:
+        dietary_filters['vegetarian'] = True
+    if vegan:
+        dietary_filters['vegan'] = True
+    if gluten_free:
+        dietary_filters['gluten_free'] = True
+    if dairy_free:
+        dietary_filters['dairy_free'] = True
+    
+    # Apply dietary filters if any are selected
+    if dietary_filters:
+        recipes = Recipe.filter_by_dietary(recipes, dietary_filters)
+    
+    # Apply time filter
+    if max_time:
+        recipes = Recipe.filter_by_time(recipes, max_time)
+    
+    # Apply difficulty filter
+    if difficulty:
+        recipes = Recipe.filter_by_difficulty(recipes, difficulty)
+    
+    # Get user's dietary preferences for filter defaults
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM user_preferences WHERE user_id = %s", (current_user.id,))
+    preferences = cursor.fetchone()
+    cursor.close()
+    
+    return render_template('recipe/search.html', 
+                          recipes=recipes, 
+                          search_term=search_term,
+                          preferences=preferences,
+                          max_time=max_time,
+                          difficulty=difficulty)
+
+@recipe_bp.route('/<recipe_id>')
+@login_required
+def detail(recipe_id):
+    recipe = Recipe.get_by_id(recipe_id)
+    
+    if not recipe:
+        flash('Recipe not found.', 'danger')
+        return redirect(url_for('recipe.index'))
+    
+    # Check if user has the ingredients
+    inventory_items = Inventory.get_by_user_id(current_user.id)
+    user_ingredients = {item.ingredient_name: {'quantity': item.quantity, 'unit': item.unit} 
+                      for item in inventory_items}
+    
+    has_all_ingredients = True
+    missing_ingredients = []
+    
+    for ingredient in recipe.get('ingredients', []):
+        name = ingredient.get('name')
+        amount = ingredient.get('amount', 0)
+        unit = ingredient.get('unit', '')
+        
+        if name not in user_ingredients:
+            has_all_ingredients = False
+            missing_ingredients.append({
+                'name': name,
+                'amount': amount,
+                'unit': unit
+            })
+        elif user_ingredients[name]['quantity'] < amount:
+            # Check if units are different but convertible
+            if user_ingredients[name]['unit'] != unit:
+                converted = Inventory.convert_units(
+                    user_ingredients[name]['quantity'], 
+                    user_ingredients[name]['unit'], 
+                    unit
+                )
+                if converted is not None and converted >= amount:
+                    # User has enough after conversion
+                    continue
+            
+            has_all_ingredients = False
+            missing_ingredients.append({
+                'name': name,
+                'amount': amount - user_ingredients[name]['quantity'],
+                'unit': unit
+            })
+    
+    return render_template('recipe/detail.html', 
+                          recipe=recipe, 
+                          has_all_ingredients=has_all_ingredients,
+                          missing_ingredients=missing_ingredients)
+
+@recipe_bp.route('/<recipe_id>/complete', methods=['POST'])
+@login_required
+def complete(recipe_id):
+    recipe = Recipe.get_by_id(recipe_id)
+    
+    if not recipe:
+        flash('Recipe not found.', 'danger')
+        return redirect(url_for('recipe.index'))
+    
+    servings = int(request.form.get('servings', 1))
+    
+    # Mark recipe as completed
+    completed_id = CompletedRecipe.mark_completed(current_user.id, recipe_id, servings)
+    
+    if completed_id:
+        flash('Recipe marked as completed and inventory updated!', 'success')
+    else:
+        flash('Error marking recipe as completed.', 'danger')
+    
+    return redirect(url_for('recipe.detail', recipe_id=recipe_id))
+
+@recipe_bp.route('/completed')
+@login_required
+def completed():
+    completed_recipes = CompletedRecipe.get_by_user(current_user.id)
+    return render_template('recipe/completed.html', completed_recipes=completed_recipes)
+
+@recipe_bp.route('/api/can-make', methods=['GET'])
+@login_required
+def api_can_make():
+    # Get user's inventory ingredients
+    inventory_items = Inventory.get_by_user_id(current_user.id)
+    ingredient_names = [item.ingredient_name for item in inventory_items]
+    
+    # Get recipes that can be made with these ingredients
+    recipes = Recipe.search_by_ingredients(ingredient_names)
+    
+    # Format for JSON response
+    recipes_list = []
+    for recipe in recipes:
+        recipes_list.append({
+            'id': str(recipe['_id']),
+            'name': recipe['name'],
+            'match_percentage': recipe.get('match_percentage', 0)
+        })
+    
+    return jsonify({'recipes': recipes_list})
+*********
+from flask import Blueprint, render_template, redirect, url_for, request, flash, jsonify
+from flask_login import login_required, current_user
+from models.meal_plan import MealPlan
+from models.recipe import Recipe
+from models.inventory import Inventory
+from datetime import datetime, timedelta
+from database.mysql_setup import get_connection
+import random
+
+meal_plan_bp = Blueprint('meal_plan', __name__, url_prefix='/meal-plan')
+
+@meal_plan_bp.route('/')
+@login_required
+def index():
+    # Determine the current week's start date (Monday)
+    today = datetime.now().date()
+    days_since_monday = today.weekday()
+    week_start_date = today - timedelta(days=days_since_monday)
+    
+    # Get meal plans for current week
+    meal_plans = MealPlan.get_by_user(current_user.id, week_start_date)
+    
+    # If no meal plan exists for this week, create one
+    if not meal_plans:
+        meal_plan = MealPlan.create(current_user.id, week_start_date)
+        meal_plans = [meal_plan] if meal_plan else []
+    
+    # Get user's inventory ingredients for recipe suggestions
+    inventory_items = Inventory.get_by_user_id(current_user.id)
+    ingredient_names = [item.ingredient_name for item in inventory_items]
+    
+    # Get recipe suggestions based on inventory
+    recipe_suggestions = Recipe.search_by_ingredients(ingredient_names)
+    
+    # Apply dietary preferences to suggestions
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM user_preferences WHERE user_id = %s", (current_user.id,))
+    preferences = cursor.fetchone()
+    cursor.close()
+    
+    if preferences and any([preferences['is_vegetarian'], preferences['is_vegan'], 
+                           preferences['is_gluten_free'], preferences['is_dairy_free']]):
+        dietary_filters = {
+            'vegetarian': preferences['is_vegetarian'],
+            'vegan': preferences['is_vegan'],
+            'gluten_free': preferences['is_gluten_free'],
+            'dairy_free': preferences['is_dairy_free']
+        }
+        # Only apply filters that are true
+        active_filters = {k: v for k, v in dietary_filters.items() if v}
+        
+        if active_filters:
+            recipe_suggestions = Recipe.filter_by_dietary(recipe_suggestions, active_filters)
+    
+    # Limit to top 10 suggestions
+    recipe_suggestions = recipe_suggestions[:10]
+    
+    return render_template('meal_plan/index.html', 
+                          meal_plans=meal_plans, 
+                          week_start_date=week_start_date,
+                          recipe_suggestions=recipe_suggestions)
+
+@meal_plan_bp.route('/add', methods=['POST'])
+@login_required
+def add_recipe():
+    plan_id = request.form.get('plan_id')
+    recipe_id = request.form.get('recipe_id')
+    day_of_week = int(request.form.get('day_of_week'))
+    meal_type = request.form.get('meal_type')
+    
+    if not all([plan_id, recipe_id, day_of_week, meal_type]):
+        flash('Missing required fields.', 'danger')
+        return redirect(url_for('meal_plan.index'))
+    
+    # Add recipe to meal plan
+    updated_plan = MealPlan.add_item(plan_id, recipe_id, day_of_week, meal_type)
+    
+    if updated_plan:
+        flash('Recipe added to meal plan!', 'success')
+    else:
+        flash('Error adding recipe to meal plan.', 'danger')
+    
+    return redirect(url_for('meal_plan.index'))
+
+@meal_plan_bp.route('/remove/<int:item_id>', methods=['POST'])
+@login_required
+def remove_recipe(item_id):
+    # Remove recipe from meal plan
+    updated_plan = MealPlan.remove_item(item_id)
+    
+    if updated_plan:
+        flash('Recipe removed from meal plan!', 'success')
+    else:
+        flash('Error removing recipe from meal plan.', 'danger')
+    
+    return redirect(url_for('meal_plan.index'))
+
+@meal_plan_bp.route('/generate', methods=['GET'])
+@login_required
+def generate_plan():
+    # Get the meal plan ID from the query string
+    plan_id = request.args.get('plan_id')
+    
+    if not plan_id:
+        flash('No meal plan specified.', 'danger')
+        return redirect(url_for('meal_plan.index'))
+    
+    # Get user's inventory items
+    inventory_items = Inventory.get_by_user_id(current_user.id)
+    
+    # Create a lookup table for inventory items
+    inventory_lookup = {}
+    for item in inventory_items:
+        inventory_lookup[item.ingredient_name] = {
+            'quantity': item.quantity,
+            'unit': item.unit
+        }
+    
+    # Get user's dietary preferences
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM user_preferences WHERE user_id = %s", (current_user.id,))
+    preferences = cursor.fetchone()
+    cursor.close()
+    
+    # Get all recipes
+    all_recipes = Recipe.get_all()
+    
+    # Apply dietary filters if applicable
+    if preferences and any([preferences['is_vegetarian'], preferences['is_vegan'], 
+                           preferences['is_gluten_free'], preferences['is_dairy_free']]):
+        dietary_filters = {
+            'vegetarian': preferences['is_vegetarian'],
+            'vegan': preferences['is_vegan'],
+            'gluten_free': preferences['is_gluten_free'],
+            'dairy_free': preferences['is_dairy_free']
+        }
+        # Only apply filters that are true
+        active_filters = {k: v for k, v in dietary_filters.items() if v}
+        
+        if active_filters:
+            all_recipes = Recipe.filter_by_dietary(all_recipes, active_filters)
+    
+    if len(all_recipes) < 10:  # Minimum recipes needed for a varied meal plan
+        flash('Not enough suitable recipes found. Please adjust your dietary preferences.', 'warning')
+        return redirect(url_for('meal_plan.index'))
+    
+    # Clear existing meal plan
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM meal_plan_items WHERE meal_plan_id = %s", (plan_id,))
+    conn.commit()
+    cursor.close()
+    
+    # Score recipes based on available ingredients
+    scored_recipes = []
+    for recipe in all_recipes:
+        # Calculate how many ingredients we have for this recipe
+        available_count = 0
+        total_ingredients = len(recipe.get('ingredients', []))
+        
+        for ingredient in recipe.get('ingredients', []):
+            name = ingredient.get('name')
+            if name in inventory_lookup:
+                available_count += 1
+        
+        if total_ingredients > 0:
+            score = (available_count / total_ingredients) * 100
+        else:
+            score = 0
+            
+        # Add difficulty and time factors to scoring
+        if recipe.get('difficulty') == 'Easy':
+            score += 10
+        elif recipe.get('difficulty') == 'Hard':
+            score -= 10
+            
+        # Prefer recipes that don't take too long
+        total_time = recipe.get('prep_time', 0) + recipe.get('cook_time', 0)
+        if total_time <= 30:
+            score += 10
+        elif total_time >= 90:
+            score -= 10
+            
+        scored_recipes.append({
+            'recipe': recipe,
+            'score': score
+        })
+    
+    # Sort recipes by score (highest first)
+    scored_recipes.sort(key=lambda x: x['score'], reverse=True)
+    
+    # Group recipes by meal type preference
+    breakfast_recipes = [r for r in scored_recipes if 'breakfast' in r['recipe'].get('tags', [])]
+    lunch_recipes = [r for r in scored_recipes if any(tag in r['recipe'].get('tags', []) for tag in ['lunch', 'sandwich', 'salad', 'soup'])]
+    dinner_recipes = [r for r in scored_recipes if any(tag in r['recipe'].get('tags', []) for tag in ['dinner', 'main', 'pasta', 'meat', 'fish'])]
+    
+    # If not enough specific recipes, add more from general pool
+    if len(breakfast_recipes) < 7:
+        # Add recipes that are not already categorized
+        remaining = [r for r in scored_recipes if r not in breakfast_recipes and r not in lunch_recipes and r not in dinner_recipes]
+        breakfast_recipes.extend(remaining[:7-len(breakfast_recipes)])
+    
+    if len(lunch_recipes) < 7:
+        # Add recipes that are not already categorized
+        remaining = [r for r in scored_recipes if r not in breakfast_recipes and r not in lunch_recipes and r not in dinner_recipes]
+        lunch_recipes.extend(remaining[:7-len(lunch_recipes)])
+    
+    if len(dinner_recipes) < 7:
+        # Add recipes that are not already categorized
+        remaining = [r for r in scored_recipes if r not in breakfast_recipes and r not in lunch_recipes and r not in dinner_recipes]
+        dinner_recipes.extend(remaining[:7-len(dinner_recipes)])
+    
+    # Create meal plan for each day
+    meal_types = ['breakfast', 'lunch', 'dinner']
+    
+    for day in range(7):  # 0-6 for Monday to Sunday
+        # Select a breakfast recipe
+        if breakfast_recipes:
+            breakfast = random.choice(breakfast_recipes[:min(10, len(breakfast_recipes))])
+            MealPlan.add_item(plan_id, str(breakfast['recipe']['_id']), day, 'breakfast')
+            # Remove recipe to avoid duplicates
+            breakfast_recipes.remove(breakfast)
+        
+        # Select a lunch recipe
+        if lunch_recipes:
+            lunch = random.choice(lunch_recipes[:min(10, len(lunch_recipes))])
+            MealPlan.add_item(plan_id, str(lunch['recipe']['_id']), day, 'lunch')
+            # Remove recipe to avoid duplicates
+            lunch_recipes.remove(lunch)
+        
+        # Select a dinner recipe
+        if dinner_recipes:
+            dinner = random.choice(dinner_recipes[:min(10, len(dinner_recipes))])
+            MealPlan.add_item(plan_id, str(dinner['recipe']['_id']), day, 'dinner')
+            # Remove recipe to avoid duplicates
+            dinner_recipes.remove(dinner)
+    
+    flash('Personalized meal plan generated successfully!', 'success')
+    return redirect(url_for('meal_plan.index'))
+
+@meal_plan_bp.route('/grocery-list')
+@login_required
+def grocery_list():
+    # Get the current meal plan
+    today = datetime.now().date()
+    days_since_monday = today.weekday()
+    week_start_date = today - timedelta(days=days_since_monday)
+    
+    meal_plans = MealPlan.get_by_user(current_user.id, week_start_date)
+    
+    if not meal_plans:
+        flash('No meal plan found for this week.', 'warning')
+        return redirect(url_for('meal_plan.index'))
+    
+    meal_plan = meal_plans[0]
+    
+    # Get user's inventory
+    inventory_items = Inventory.get_by_user_id(current_user.id)
+    user_ingredients = {item.ingredient_name: {'quantity': item.quantity, 'unit': item.unit} 
+                      for item in inventory_items}
+    
+    # Compile grocery list from meal plan
+    grocery_list = {}
+    
+    for item in meal_plan.items:
+        recipe = item['recipe']
+        
+        for ingredient in recipe.get('ingredients', []):
+            name = ingredient.get('name')
+            amount = ingredient.get('amount', 0)
+            unit = ingredient.get('unit', '')
+            
+            # Check if user already has this ingredient
+            if name in user_ingredients:
+                user_quantity = user_ingredients[name]['quantity']
+                user_unit = user_ingredients[name]['unit']
+                
+                # Convert units if needed
+                if user_unit != unit:
+                    converted = Inventory.convert_units(user_quantity, user_unit, unit)
+                    if converted is not None:
+                        user_quantity = converted
+                
+                # If user has enough, skip
+                if user_quantity >= amount:
+                    continue
+                
+                # Otherwise, add the difference
+                amount -= user_quantity
+            
+            # Add to grocery list
+            if name in grocery_list:
+                # If unit matches, add quantities
+                if grocery_list[name]['unit'] == unit:
+                    grocery_list[name]['amount'] += amount
+                else:
+                    # Try to convert
+                    converted = Inventory.convert_units(grocery_list[name]['amount'], grocery_list[name]['unit'], unit)
+                    if converted is not None:
+                        grocery_list[name]['amount'] = converted + amount
+                        grocery_list[name]['unit'] = unit
+                    else:
+                        # Can't convert, keep separate entry
+                        grocery_list[f"{name} ({unit})"] = {'name': name, 'amount': amount, 'unit': unit}
+            else:
+                grocery_list[name] = {'name': name, 'amount': amount, 'unit': unit}
+    
+    # Convert to list
+    grocery_items = list(grocery_list.values())
+    
+    # Sort by name
+    grocery_items.sort(key=lambda x: x['name'])
+    
+    return render_template('meal_plan/grocery_list.html', 
+                          meal_plan=meal_plan, 
+                          grocery_list=grocery_items)
+
+
+
+
+//////////////////////////////////
+
+from database.mysql_setup import get_connection
+from models.recipe import Recipe
+from models.inventory import Inventory
+from datetime import datetime
+
+class CompletedRecipe:
+    def __init__(self, id, user_id, recipe_id, completed_date, servings_made):
+        self.id = id
+        self.user_id = user_id
+        self.recipe_id = recipe_id
+        self.completed_date = completed_date
+        self.servings_made = servings_made
+        self.recipe = None
+    
+    @staticmethod
+    def get_by_user(user_id, limit=10):
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        cursor.execute(
+            """
+            SELECT * FROM completed_recipes 
+            WHERE user_id = %s 
+            ORDER BY completed_date DESC
+            LIMIT %s
+            """,
+            (user_id, limit)
+        )
+        
+        completed_recipes = []
+        for data in cursor.fetchall():
+            completed = CompletedRecipe(
+                id=data['id'],
+                user_id=data['user_id'],
+                recipe_id=data['recipe_id'],
+                completed_date=data['completed_date'],
+                servings_made=data['servings_made']
+            )
+            
+            # Get recipe details
+            recipe = Recipe.get_by_id(data['recipe_id'])
+            if recipe:
+                completed.recipe = recipe
+            
+            completed_recipes.append(completed)
+        
+        cursor.close()
+        return completed_recipes
+    
+    @staticmethod
+    def mark_completed(user_id, recipe_id, servings_made=1):
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                """
+                INSERT INTO completed_recipes 
+                (user_id, recipe_id, servings_made) 
+                VALUES (%s, %s, %s)
+                """,
+                (user_id, recipe_id, servings_made)
+            )
+            conn.commit()
+            completed_id = cursor.lastrowid
+            cursor.close()
+            
+            # Update inventory based on recipe ingredients used
+            CompletedRecipe.update_inventory(user_id, recipe_id, servings_made)
+            
+            return completed_id
+        except Exception as e:
+            conn.rollback()
+            cursor.close()
+            print(f"Error marking recipe as completed: {e}")
+            return None
+    
+    @staticmethod
+    def update_inventory(user_id, recipe_id, servings_made):
+        # Get recipe details
+        recipe = Recipe.get_by_id(recipe_id)
+        if not recipe:
+            return False
+        
+        # Get recipe ingredients
+        ingredients = recipe.get('ingredients', [])
+        recipe_servings = recipe.get('servings', 1)
+        
+        # Get user's inventory
+        inventory_items = Inventory.get_by_user_id(user_id)
+        inventory_dict = {}
+        for item in inventory_items:
+            inventory_dict[item.ingredient_name] = {
+                'id': item.id,
+                'quantity': item.quantity,
+                'unit': item.unit,
+            }
+        
+        # Calculate ingredient amounts based on servings made
+        for ingredient in ingredients:
+            ingredient_name = ingredient.get('name')
+            amount = ingredient.get('amount', 0)
+            unit = ingredient.get('unit', '')
+            
+            # Calculate amount used based on servings
+            if recipe_servings > 0:
+                amount_used = (amount / recipe_servings) * servings_made
+                
+                # If user has this ingredient, update it
+                if ingredient_name in inventory_dict:
+                    inventory_item = inventory_dict[ingredient_name]
+                    
+                    # If units match, simple update
+                    if inventory_item['unit'] == unit:
+                        Inventory.update_quantity(user_id, ingredient_name, -amount_used)
+                    else:
+                        # Try to convert units
+                        converted = Inventory.convert_units(amount_used, unit, inventory_item['unit'])
+                        if converted is not None:
+                            Inventory.update_quantity(user_id, ingredient_name, -converted)
+        
+        return True
+*******
+{% extends "base.html" %}
+
+{% block title %}CookBookIt - Profile{% endblock %}
+
+{% block content %}
+<div class="slide-in-up">
+    <h1 class="mb-4">Your Profile</h1>
+    
+    <div class="card mb-4">
+        <div class="card-body">
+            <h2 class="card-title">Account Information</h2>
+            <p><strong>Username:</strong> {{ current_user.username }}</p>
+            <p><strong>Email:</strong> {{ current_user.email }}</p>
+            <p><strong>Member since:</strong> {{ member_since.strftime('%B %d, %Y') }}</p>
+        </div>
+    </div>
+    
+    <div class="card mb-4">
+        <div class="card-body">
+            <h2 class="card-title">Dietary Preferences</h2>
+            
+            <form method="POST" action="{{ url_for('auth.update_preferences') }}">
+                <div class="form-group">
+                    <div>
+                        <input type="checkbox" id="vegetarian" name="vegetarian" class="mr-2"
+                              {% if preferences and preferences.is_vegetarian %}checked{% endif %}>
+                        <label for="vegetarian">Vegetarian</label>
+                    </div>
+                    <div>
+                        <input type="checkbox" id="vegan" name="vegan" class="mr-2"
+                              {% if preferences and preferences.is_vegan %}checked{% endif %}>
+                        <label for="vegan">Vegan</label>
+                    </div>
+                    <div>
+                        <input type="checkbox" id="gluten_free" name="gluten_free" class="mr-2"
+                              {% if preferences and preferences.is_gluten_free %}checked{% endif %}>
+                        <label for="gluten_free">Gluten Free</label>
+                    </div>
+                    <div>
+                        <input type="checkbox" id="dairy_free" name="dairy_free" class="mr-2"
+                              {% if preferences and preferences.is_dairy_free %}checked{% endif %}>
+                        <label for="dairy_free">Dairy Free</label>
+                    </div>
+                </div>
+                
+                <button type="submit" class="btn btn-primary mt-3">Update Preferences</button>
+            </form>
+        </div>
+    </div>
+    
+    <div class="card">
+        <div class="card-body">
+            <h2 class="card-title">Account Settings</h2>
+            
+            <div class="mt-3">
+                <a href="{{ url_for('auth.change_password') }}" class="btn btn-outline">Change Password</a>
+                <a href="{{ url_for('auth.delete_account') }}" class="btn btn-danger" onclick="return confirm('Are you sure you want to delete your account? This cannot be undone.')">Delete Account</a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+*********
+{% extends "base.html" %}
+
+{% block title %}CookBookIt - Change Password{% endblock %}
+
+{% block content %}
+<div class="slide-in-up">
+    <h1 class="mb-4">Change Password</h1>
+    
+    <div class="card">
+        <div class="card-body">
+            <form method="POST" action="{{ url_for('auth.change_password') }}">
+                {{ form.hidden_tag() }}
+                
+                <div class="form-group">
+                    {{ form.current_password.label(class="form-label") }}
+                    {{ form.current_password(class="form-control") }}
+                    {% if form.current_password.errors %}
+                        {% for error in form.current_password.errors %}
+                            <span class="text-danger">{{ error }}</span>
+                        {% endfor %}
+                    {% endif %}
+                </div>
+                
+                <div class="form-group">
+                    {{ form.new_password.label(class="form-label") }}
+                    {{ form.new_password(class="form-control") }}
+                    {% if form.new_password.errors %}
+                        {% for error in form.new_password.errors %}
+                            <span class="text-danger">{{ error }}</span>
+                        {% endfor %}
+                    {% endif %}
+                </div>
+                
+                <div class="form-group">
+                    {{ form.confirm_password.label(class="form-label") }}
+                    {{ form.confirm_password(class="form-control") }}
+                    {% if form.confirm_password.errors %}
+                        {% for error in form.confirm_password.errors %}
+                            <span class="text-danger">{{ error }}</span>
+                        {% endfor %}
+                    {% endif %}
+                </div>
+                
+                <div class="d-flex justify-content-between mt-4">
+                    <a href="{{ url_for('auth.profile') }}" class="btn btn-outline">Cancel</a>
+                    <button type="submit" class="btn btn-primary">Update Password</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+**********
+{% extends "base.html" %}
+
+{% block title %}CookBookIt - Add Ingredient{% endblock %}
+
+{% block content %}
+<div class="slide-in-up">
+    <h1 class="mb-4">{{ title }}</h1>
+    
+    <div class="card">
+        <div class="card-body">
+            <form method="POST">
+                {{ form.hidden_tag() }}
+                
+                <div class="form-group" style="position: relative;">
+                    {{ form.ingredient_name.label(class="form-label") }}
+                    {{ form.ingredient_name(class="form-control", id="ingredient-name-input", autocomplete="off") }}
+                    <div id="ingredient-suggestions" class="ingredient-suggestions"></div>
+                    {% if form.ingredient_name.errors %}
+                        {% for error in form.ingredient_name.errors %}
+                            <span class="text-danger">{{ error }}</span>
+                        {% endfor %}
+                    {% endif %}
+                </div>
+                
+                <div class="form-group">
+                    {{ form.category.label(class="form-label") }}
+                    {{ form.category(class="form-select") }}
+                    {% if form.category.errors %}
+                        {% for error in form.category.errors %}
+                            <span class="text-danger">{{ error }}</span>
+                        {% endfor %}
+                    {% endif %}
+                </div>
+                
+                <div class="d-flex gap-3">
+                    <div class="form-group" style="flex: 1;">
+                        {{ form.quantity.label(class="form-label") }}
+                        {{ form.quantity(class="form-control", min="0.01", step="0.01") }}
+                        {% if form.quantity.errors %}
+                            {% for error in form.quantity.errors %}
+                                <span class="text-danger">{{ error }}</span>
+                            {% endfor %}
+                        {% endif %}
+                    </div>
+                    
+                    <div class="form-group" style="flex: 1;">
+                        {{ form.unit.label(class="form-label") }}
+                        {{ form.unit(class="form-select", id="unit-select") }}
+                        {% if form.unit.errors %}
+                            {% for error in form.unit.errors %}
+                                <span class="text-danger">{{ error }}</span>
+                            {% endfor %}
+                        {% endif %}
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    {{ form.expiry_date.label(class="form-label") }}
+                    {{ form.expiry_date(class="form-control", type="date") }}
+                    {% if form.expiry_date.errors %}
+                        {% for error in form.expiry_date.errors %}
+                            <span class="text-danger">{{ error }}</span>
+                        {% endfor %}
+                    {% endif %}
+                </div>
+                
+                <div class="d-flex justify-content-between mt-4">
+                    <a href="{{ url_for('inventory.index') }}" class="btn btn-outline">Cancel</a>
+                    <button type="submit" class="btn btn-primary">Save Ingredient</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const ingredientInput = document.getElementById('ingredient-name-input');
+    const suggestionsContainer = document.getElementById('ingredient-suggestions');
+    const unitSelect = document.getElementById('unit-select');
+    
+    // Store the ingredient data
+    let ingredientData = [];
+    
+    // Fetch ingredients
+    async function fetchIngredients(searchTerm) {
+        try {
+            const response = await fetch(`/inventory/api/ingredients?term=${searchTerm}`);
+            const data = await response.json();
+            return data.ingredients;
+        } catch (error) {
+            console.error('Error fetching ingredients:', error);
+            return [];
+        }
+    }
+    
+    // Debounce function to prevent too many API calls
+    function debounce(func, wait) {
+        let timeout;
+        return function(...args) {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => func.apply(this, args), wait);
+        };
+    }
+    
+    // Handle input changes
+    const handleInputChange = debounce(async function() {
+        const searchTerm = ingredientInput.value.trim().toLowerCase();
+        
+        if (searchTerm.length < 2) {
+            suggestionsContainer.innerHTML = '';
+            suggestionsContainer.style.display = 'none';
+            return;
+        }
+        
+        // Fetch ingredients that match the search term
+        ingredientData = await fetchIngredients(searchTerm);
+        
+        // Display suggestions
+        if (ingredientData.length > 0) {
+            suggestionsContainer.innerHTML = '';
+            
+            ingredientData.forEach(ingredient => {
+                const div = document.createElement('div');
+                div.className = 'suggestion-item';
+                div.textContent = ingredient.name;
+                div.addEventListener('click', () => selectIngredient(ingredient));
+                suggestionsContainer.appendChild(div);
+            });
+            
+            suggestionsContainer.style.display = 'block';
+        } else {
+            suggestionsContainer.innerHTML = '';
+            suggestionsContainer.style.display = 'none';
+        }
+    }, 300);
+    
+    // Select an ingredient from suggestions
+    function selectIngredient(ingredient) {
+        ingredientInput.value = ingredient.name;
+        
+        // Set the unit if available
+        if (ingredient.unit) {
+            // Find the option with this unit value
+            for (let i = 0; i < unitSelect.options.length; i++) {
+                if (unitSelect.options[i].value === ingredient.unit) {
+                    unitSelect.selectedIndex = i;
+                    break;
+                }
+            }
+        }
+        
+        // Hide suggestions
+        suggestionsContainer.innerHTML = '';
+        suggestionsContainer.style.display = 'none';
+    }
+    
+    // Add event listeners
+    ingredientInput.addEventListener('input', handleInputChange);
+    
+    // Close suggestions when clicking outside
+    document.addEventListener('click', function(event) {
+        if (event.target !== ingredientInput && event.target !== suggestionsContainer) {
+            suggestionsContainer.style.display = 'none';
+        }
+    });
+});
+</script>
+
+<style>
+.ingredient-suggestions {
+    position: absolute;
+    z-index: 10;
+    background: white;
+    border: 1px solid #ced4da;
+    border-radius: 0.375rem;
+    width: 100%;
+    max-height: 200px;
+    overflow-y: auto;
+    display: none;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+}
+
+.suggestion-item {
+    padding: 8px 12px;
+    cursor: pointer;
+}
+
+.suggestion-item:hover {
+    background-color: var(--gray-200);
+}
+</style>
+{% endblock %}
+*********
+{% extends "base.html" %}
+
+{% block title %}CookBookIt - Recipe Search{% endblock %}
+
+{% block content %}
+<div class="slide-in-up">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h1>Recipe Search</h1>
+    </div>
+    
+    <div class="card mb-4">
+        <div class="card-body">
+            <form action="{{ url_for('recipe.search') }}" method="GET" class="d-flex gap-2">
+                <input type="text" name="term" value="{{ search_term }}" class="form-control" placeholder="Search for recipes...">
+                <button type="submit" class="btn btn-primary">Search</button>
+                <button type="button" id="filter-toggle" class="btn btn-outline">Show Filters</button>
+            </form>
+            
+            <div id="filter-form" class="mt-3 {% if not (request.args.get('vegetarian') or request.args.get('vegan') or request.args.get('gluten_free') or request.args.get('dairy_free') or request.args.get('max_time') or request.args.get('difficulty')) %}d-none{% endif %}">
+                <form action="{{ url_for('recipe.search') }}" method="GET">
+                    {% if search_term %}
+                        <input type="hidden" name="term" value="{{ search_term }}">
+                    {% endif %}
+                    
+                    <h3 class="mb-2">Filters</h3>
+                    
+                    <!-- Dietary Preferences -->
+                    <div class="mb-3">
+                        <h4 class="mb-2">Dietary Preferences</h4>
+                        <div class="d-flex flex-wrap gap-3">
+                            <div>
+                                <input type="checkbox" id="vegetarian" name="vegetarian" {% if request.args.get('vegetarian') == 'on' %}checked{% endif %}>
+                                <label for="vegetarian">Vegetarian</label>
+                            </div>
+                            <div>
+                                <input type="checkbox" id="vegan" name="vegan" {% if request.args.get('vegan') == 'on' %}checked{% endif %}>
+                                <label for="vegan">Vegan</label>
+                            </div>
+                            <div>
+                                <input type="checkbox" id="gluten_free" name="gluten_free" {% if request.args.get('gluten_free') == 'on' %}checked{% endif %}>
+                                <label for="gluten_free">Gluten Free</label>
+                            </div>
+                            <div>
+                                <input type="checkbox" id="dairy_free" name="dairy_free" {% if request.args.get('dairy_free') == 'on' %}checked{% endif %}>
+                                <label for="dairy_free">Dairy Free</label>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Time Filter -->
+                    <div class="mb-3">
+                        <h4 class="mb-2">Maximum Time</h4>
+                        <select name="max_time" class="form-select" style="max-width: 200px;">
+                            <option value="">Any Time</option>
+                            <option value="15" {% if request.args.get('max_time') == '15' %}selected{% endif %}>15 minutes or less</option>
+                            <option value="30" {% if request.args.get('max_time') == '30' %}selected{% endif %}>30 minutes or less</option>
+                            <option value="45" {% if request.args.get('max_time') == '45' %}selected{% endif %}>45 minutes or less</option>
+                            <option value="60" {% if request.args.get('max_time') == '60' %}selected{% endif %}>1 hour or less</option>
+                            <option value="90" {% if request.args.get('max_time') == '90' %}selected{% endif %}>1.5 hours or less</option>
+                            <option value="120" {% if request.args.get('max_time') == '120' %}selected{% endif %}>2 hours or less</option>
+                        </select>
+                    </div>
+                    
+                    <!-- Difficulty Filter -->
+                    <div class="mb-3">
+                        <h4 class="mb-2">Difficulty</h4>
+                        <select name="difficulty" class="form-select" style="max-width: 200px;">
+                            <option value="">Any Difficulty</option>
+                            <option value="Easy" {% if request.args.get('difficulty') == 'Easy' %}selected{% endif %}>Easy</option>
+                            <option value="Medium" {% if request.args.get('difficulty') == 'Medium' %}selected{% endif %}>Medium</option>
+                            <option value="Hard" {% if request.args.get('difficulty') == 'Hard' %}selected{% endif %}>Hard</option>
+                        </select>
+                    </div>
+                    
+                    <button type="submit" class="btn btn-primary mt-2">Apply Filters</button>
+                    <a href="{{ url_for('recipe.search') }}" class="btn btn-outline mt-2 ml-2">Clear Filters</a>
+                </form>
+            </div>
+        </div>
+    </div>
+    
+    <div id="recipe-results" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.5rem;">
+        {% if recipes|length > 0 %}
+            {% for recipe in recipes %}
+                <div class="recipe-card card">
+                    <img src="{{ url_for('static', filename=Recipe.get_image_path(recipe._id, recipe.image_url)) }}" alt="{{ recipe.name }}" class="card-img">
+                    <div class="card-body">
+                        <h3 class="card-title">{{ recipe.name }}</h3>
+                        <p class="card-text">{{ recipe.description }}</p>
+                        <div class="recipe-meta">
+                            <span>{{ recipe.prep_time + recipe.cook_time }} mins</span>
+                            <span>{{ recipe.difficulty }}</span>
+                        </div>
+                        <div class="recipe-tags">
+                            {% for tag in recipe.tags[:3] %}
+                                <span class="recipe-tag">{{ tag }}</span>
+                            {% endfor %}
+                            {% for key, value in recipe.dietary_info.items() %}
+                                {% if value %}
+                                    <span class="recipe-tag badge-info">{{ key|replace('_', ' ')|title }}</span>
+                                {% endif %}
+                            {% endfor %}
+                        </div>
+                        <a href="{{ url_for('recipe.detail', recipe_id=recipe._id) }}" class="btn btn-primary mt-2">View Recipe</a>
+                    </div>
+                </div>
+            {% endfor %}
+        {% else %}
+            <div class="text-center" style="grid-column: 1 / -1;">
+                <h3>No recipes found</h3>
+                <p>Try a different search term or adjust your filters.</p>
+            </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const filterToggle = document.getElementById('filter-toggle');
+    const filterForm = document.getElementById('filter-form');
+    
+    if (filterToggle && filterForm) {
+        filterToggle.addEventListener('click', function() {
+            if (filterForm.classList.contains('d-none')) {
+                filterForm.classList.remove('d-none');
+                filterForm.classList.add('slide-in-up');
+                filterToggle.textContent = 'Hide Filters';
+            } else {
+                filterForm.classList.add('d-none');
+                filterForm.classList.remove('slide-in-up');
+                filterToggle.textContent = 'Show Filters';
+            }
+        });
+        
+        // Update button text based on initial state
+        if (!filterForm.classList.contains('d-none')) {
+            filterToggle.textContent = 'Hide Filters';
+        }
+    }
+});
+</script>
+{% endblock %}
+********
+{% extends "base.html" %}
+
+{% block title %}CookBookIt - Meal Plan{% endblock %}
+
+{% block content %}
+<div class="slide-in-up">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h1>Your Meal Plan</h1>
+        <div>
+            <a href="{{ url_for('meal_plan.grocery_list') }}" class="btn btn-outline">Generate Grocery List</a>
+            {% if meal_plans|length > 0 %}
+            <a href="{{ url_for('meal_plan.generate_plan', plan_id=meal_plans[0].id) }}" class="btn btn-primary">Auto-Generate Plan</a>
+            {% endif %}
+        </div>
+    </div>
+    
+    {% if meal_plans|length > 0 %}
+        {% set meal_plan = meal_plans[0] %}
+        <div class="card mb-4">
+            <div class="card-body">
+                <h2>Week of {{ meal_plan.week_start_date.strftime('%B %d, %Y') }}</h2>
+                
+                <div class="meal-plan-grid mt-3">
+                    <!-- Headers - days of week -->
+                    <div></div>
+                    <div class="meal-plan-header">Mon</div>
+                    <div class="meal-plan-header">Tue</div>
+                    <div class="meal-plan-header">Wed</div>
+                    <div class="meal-plan-header">Thu</div>
+                    <div class="meal-plan-header">Fri</div>
+                    <div class="meal-plan-header">Sat</div>
+                    <div class="meal-plan-header">Sun</div>
+                    
+                    <!-- Breakfast row -->
+                    <div class="meal-plan-time">Breakfast</div>
+                    {% for day in range(7) %}
+                        <div class="meal-plan-cell" data-day="{{ day }}">
+                            {% set has_meal = false %}
+                            {% for item in meal_plan.items %}
+                                {% if item.day_of_week == day and item.meal_type == 'breakfast' %}
+                                    {% set has_meal = true %}
+                                    <div class="meal-plan-recipe">
+                                        <a href="{{ url_for('recipe.detail', recipe_id=item.recipe._id) }}">{{ item.recipe.name }}</a>
+                                        <form method="POST" action="{{ url_for('meal_plan.remove_recipe', item_id=item.id) }}" style="display: inline;">
+                                            <button type="submit" class="btn btn-sm btn-danger" style="padding: 0.1rem 0.3rem; font-size: 0.7rem;">×</button>
+                                        </form>
+                                    </div>
+                                {% endif %}
+                            {% endfor %}
+                            
+                            {% if not has_meal %}
+                                <div class="meal-plan-empty">No meal planned</div>
+                                <button class="btn btn-sm btn-outline add-recipe-btn" data-day="{{ day }}" data-meal-type="breakfast">Add</button>
+                            {% endif %}
+                        </div>
+                    {% endfor %}
+                    
+                    <!-- Lunch row -->
+                    <div class="meal-plan-time">Lunch</div>
+                    {% for day in range(7) %}
+                        <div class="meal-plan-cell" data-day="{{ day }}">
+                            {% set has_meal = false %}
+                            {% for item in meal_plan.items %}
+                                {% if item.day_of_week == day and item.meal_type == 'lunch' %}
+                                    {% set has_meal = true %}
+                                    <div class="meal-plan-recipe">
+                                        <a href="{{ url_for('recipe.detail', recipe_id=item.recipe._id) }}">{{ item.recipe.name }}</a>
+                                        <form method="POST" action="{{ url_for('meal_plan.remove_recipe', item_id=item.id) }}" style="display: inline;">
+                                            <button type="submit" class="btn btn-sm btn-danger" style="padding: 0.1rem 0.3rem; font-size: 0.7rem;">×</button>
+                                        </form>
+                                    </div>
+                                {% endif %}
+                            {% endfor %}
+                            
+                            {% if not has_meal %}
+                                <div class="meal-plan-empty">No meal planned</div>
+                                <button class="btn btn-sm btn-outline add-recipe-btn" data-day="{{ day }}" data-meal-type="lunch">Add</button>
+                            {% endif %}
+                        </div>
+                    {% endfor %}
+                    
+                    <!-- Dinner row -->
+                    <div class="meal-plan-time">Dinner</div>
+                    {% for day in range(7) %}
+                        <div class="meal-plan-cell" data-day="{{ day }}">
+                            {% set has_meal = false %}
+                            {% for item in meal_plan.items %}
+                                {% if item.day_of_week == day and item.meal_type == 'dinner' %}
+                                    {% set has_meal = true %}
+                                    <div class="meal-plan-recipe">
+                                        <a href="{{ url_for('recipe.detail', recipe_id=item.recipe._id) }}">{{ item.recipe.name }}</a>
+                                        <form method="POST" action="{{ url_for('meal_plan.remove_recipe', item_id=item.id) }}" style="display: inline;">
+                                            <button type="submit" class="btn btn-sm btn-danger" style="padding: 0.1rem 0.3rem; font-size: 0.7rem;">×</button>
+                                        </form>
+                                    </div>
+                                {% endif %}
+                            {% endfor %}
+                            
+                            {% if not has_meal %}
+                                <div class="meal-plan-empty">No meal planned</div>
+                                <button class="btn btn-sm btn-outline add-recipe-btn" data-day="{{ day }}" data-meal-type="dinner">Add</button>
+                            {% endif %}
+                        </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    {% else %}
+        <div class="alert alert-info">
+            <h4>No meal plan found for this week</h4>
+            <p>Create a new meal plan to get started.</p>
+        </div>
+    {% endif %}
+    
+    {% if recipe_suggestions|length > 0 %}
+        <h2 class="mb-3">Suggested Recipes</h2>
+        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.5rem;">
+            {% for recipe in recipe_suggestions %}
+                <div class="recipe-card card">
+                    <img src="{{ url_for('static', filename=Recipe.get_image_path(recipe._id, recipe.image_url)) }}" alt="{{ recipe.name }}" class="card-img">
+                    <div class="card-body">
+                        <h3 class="card-title">{{ recipe.name }}</h3>
+                        <p class="card-text">{{ recipe.description }}</p>
+                        <div class="recipe-meta">
+                            <span>{{ recipe.prep_time + recipe.cook_time }} mins</span>
+                            <span>{{ recipe.difficulty }}</span>
+                        </div>
+                        <div class="match-indicator">
+                            <div class="match-bar" data-percentage="{{ recipe.match_percentage or 0 }}">
+                                <div class="match-progress" style="width: 0%"></div>
+                            </div>
+                            <span class="match-text">{{ recipe.match_percentage|round|int }}%</span>
+                        </div>
+                        <a href="{{ url_for('recipe.detail', recipe_id=recipe._id) }}" class="btn btn-primary mt-2">View Recipe</a>
+                    </div>
+                </div>
+            {% endfor %}
+        </div>
+    {% endif %}
+    
+    <!-- Add Recipe Modal -->
+    <div id="meal-plan-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); z-index: 1000; justify-content: center; align-items: center; opacity: 0; transition: opacity 0.3s;">
+        <div class="card" style="width: 100%; max-width: 500px; transform: translateY(20px); transition: transform 0.3s;">
+            <div class="card-body">
+                <h2>Add Recipe to Meal Plan</h2>
+                
+                <form method="POST" action="{{ url_for('meal_plan.add_recipe') }}">
+                    {% if meal_plans|length > 0 %}
+                        <input type="hidden" name="plan_id" value="{{ meal_plans[0].id }}">
+                    {% endif %}
+                    <input type="hidden" id="day_of_week" name="day_of_week" value="0">
+                    <input type="hidden" id="meal_type" name="meal_type" value="breakfast">
+                    
+                    <div class="form-group">
+                        <label for="recipe_id" class="form-label">Select Recipe</label>
+                        <select id="recipe_id" name="recipe_id" class="form-select">
+                            {% for recipe in recipe_suggestions %}
+                                <option value="{{ recipe._id }}">{{ recipe.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    
+                    <div class="d-flex justify-content-between mt-4">
+                        <button type="button" id="close-meal-plan-modal" class="btn btn-outline">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Add to Meal Plan</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Meal Plan - Add recipe modal
+    const addRecipeButtons = document.querySelectorAll('.add-recipe-btn');
+    const mealPlanModal = document.getElementById('meal-plan-modal');
+    const closeMealPlanModalBtn = document.getElementById('close-meal-plan-modal');
+    
+    if (addRecipeButtons.length > 0 && mealPlanModal) {
+        addRecipeButtons.forEach(button => {
+            button.addEventListener('click', function() {
+                const day = this.getAttribute('data-day');
+                const mealType = this.getAttribute('data-meal-type');
+                
+                document.getElementById('day_of_week').value = day;
+                document.getElementById('meal_type').value = mealType;
+                
+                mealPlanModal.style.display = 'flex';
+                setTimeout(() => {
+                    mealPlanModal.classList.add('modal-open');
+                }, 10);
+            });
+        });
+        
+        if (closeMealPlanModalBtn) {
+            closeMealPlanModalBtn.addEventListener('click', function() {
+                mealPlanModal.classList.remove('modal-open');
+                setTimeout(() => {
+                    mealPlanModal.style.display = 'none';
+                }, 300);
+            });
+        }
+        
+        window.addEventListener('click', function(event) {
+            if (event.target === mealPlanModal) {
+                mealPlanModal.classList.remove('modal-open');
+                setTimeout(() => {
+                    mealPlanModal.style.display = 'none';
+                }, 300);
+            }
+        });
+    }
+    
+    // Remove "no meal planned" when adding a recipe (fix for issue #9)
+    const recipeForm = document.querySelector('form[action*="add_recipe"]');
+    if (recipeForm) {
+        recipeForm.addEventListener('submit', function() {
+            const day = document.getElementById('day_of_week').value;
+            const mealType = document.getElementById('meal_type').value;
+            
+            // Find the cell that corresponds to this day and meal type
+            const cell = document.querySelector(`.meal-plan-cell[data-day="${day}"]`);
+            if (cell) {
+                const placeholder = cell.querySelector('.meal-plan-empty');
+                if (placeholder) {
+                    placeholder.style.display = 'none';
+                }
+            }
+        });
+    }
+    
+    // Recipe match percentage visual indicators
+    const matchBars = document.querySelectorAll('.match-bar');
+    matchBars.forEach(bar => {
+        const percentage = parseFloat(bar.getAttribute('data-percentage'));
+        const progressBar = bar.querySelector('.match-progress');
+        
+        setTimeout(() => {
+            progressBar.style.width = `${percentage}%`;
+            
+            // Set color based on match percentage
+            if (percentage >= 80) {
+                progressBar.style.backgroundColor = 'var(--success)';
+            } else if (percentage >= 50) {
+                progressBar.style.backgroundColor = 'var(--sage-green)';
+            } else if (percentage >= 30) {
+                progressBar.style.backgroundColor = 'var(--warning)';
+            } else {
+                progressBar.style.backgroundColor = 'var(--terracotta)';
+            }
+        }, 100);
+    });
+});
+</script>
+
+<style>
+.meal-plan-grid {
+    display: grid;
+    grid-template-columns: 100px repeat(7, 1fr);
+    gap: 8px;
+}
+
+.meal-plan-header, .meal-plan-time {
+    font-weight: bold;
+    padding: 8px;
+    text-align: center;
+    background-color: var(--sage-green-light);
+    border-radius: 4px;
+}
+
+.meal-plan-time {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: var(--gray-200);
+}
+
+.meal-plan-cell {
+    padding: 8px;
+    min-height: 80px;
+    border: 1px solid var(--gray-300);
+    border-radius: 4px;
+    position: relative;
+}
+
+.meal-plan-recipe {
+    background-color: var(--sage-green-light);
+    padding: 6px;
+    border-radius: 4px;
+    margin-bottom: 4px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.meal-plan-recipe a {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex-grow: 1;
+}
+
+.meal-plan-empty {
+    color: var(--gray-500);
+    font-style: italic;
+    margin-bottom: 4px;
+}
+
+#meal-plan-modal.modal-open {
+    opacity: 1;
+}
+
+#meal-plan-modal.modal-open .card {
+    transform: translateY(0);
+}
+</style>
+{% endblock %}
+********
+document.addEventListener('DOMContentLoaded', function() {
+  // Handle expiration warnings
+  const expirationWarnings = document.querySelectorAll('.expiration-warning');
+  if (expirationWarnings.length > 0) {
+    setTimeout(() => {
+      expirationWarnings.forEach(warning => {
+        warning.classList.add('fade-in');
+      });
+    }, 300);
+  }
+  
+  // Recipe match percentage visual indicators
+  const matchBars = document.querySelectorAll('.match-bar');
+  matchBars.forEach(bar => {
+    const percentage = parseFloat(bar.getAttribute('data-percentage'));
+    const progressBar = bar.querySelector('.match-progress');
+    
+    setTimeout(() => {
+      progressBar.style.width = `${percentage}%`;
+      
+      // Set color based on match percentage
+      if (percentage >= 80) {
+        progressBar.style.backgroundColor = 'var(--success)';
+      } else if (percentage >= 50) {
+        progressBar.style.backgroundColor = 'var(--sage-green)';
+      } else if (percentage >= 30) {
+        progressBar.style.backgroundColor = 'var(--warning)';
+      } else {
+        progressBar.style.backgroundColor = 'var(--terracotta)';
+      }
+    }, 100);
+  });
+  
+  // Add ingredient form quantity validations
+  const quantityInput = document.getElementById('quantity');
+  if (quantityInput) {
+    quantityInput.addEventListener('input', function() {
+      if (parseFloat(this.value) <= 0) {
+        this.setCustomValidity('Quantity must be greater than 0');
+      } else {
+        this.setCustomValidity('');
+      }
+    });
+  }
+  
+  // Recipe search filters toggle
+  const filterToggle = document.getElementById('filter-toggle');
+  const filterForm = document.getElementById('filter-form');
+  
+  if (filterToggle && filterForm) {
+    filterToggle.addEventListener('click', function() {
+      if (filterForm.classList.contains('d-none')) {
+        filterForm.classList.remove('d-none');
+        filterForm.classList.add('slide-in-up');
+        filterToggle.textContent = 'Hide Filters';
+      } else {
+        filterForm.classList.add('d-none');
+        filterForm.classList.remove('slide-in-up');
+        filterToggle.textContent = 'Show Filters';
+      }
+    });
+
+    // Update button text based on initial state
+    if (!filterForm.classList.contains('d-none')) {
+      filterToggle.textContent = 'Hide Filters';
+    }
+  }
+  
+  // Recipe detail - Complete recipe modal
+  const completeRecipeBtn = document.getElementById('complete-recipe-btn');
+  const completeModal = document.getElementById('complete-modal');
+  const closeModalBtn = document.getElementById('close-modal');
+  
+  if (completeRecipeBtn && completeModal) {
+    completeRecipeBtn.addEventListener('click', function() {
+      completeModal.style.display = 'flex';
+      setTimeout(() => {
+        completeModal.classList.add('modal-open');
+      }, 10);
+    });
+    
+    if (closeModalBtn) {
+      closeModalBtn.addEventListener('click', function() {
+        completeModal.classList.remove('modal-open');
+        setTimeout(() => {
+          completeModal.style.display = 'none';
+        }, 300);
+      });
+    }
+    
+    window.addEventListener('click', function(event) {
+      if (event.target === completeModal) {
+        completeModal.classList.remove('modal-open');
+        setTimeout(() => {
+          completeModal.style.display = 'none';
+        }, 300);
+      }
+    });
+  }
+  
+  // Meal Plan - Add recipe modal
+  const addRecipeButtons = document.querySelectorAll('.add-recipe-btn');
+  const mealPlanModal = document.getElementById('meal-plan-modal');
+  const closeMealPlanModalBtn = document.getElementById('close-meal-plan-modal');
+  
+  if (addRecipeButtons.length > 0 && mealPlanModal) {
+    addRecipeButtons.forEach(button => {
+      button.addEventListener('click', function() {
+        const day = this.getAttribute('data-day');
+        const mealType = this.getAttribute('data-meal-type');
+        
+        document.getElementById('day_of_week').value = day;
+        document.getElementById('meal_type').value = mealType;
+        
+        mealPlanModal.style.display = 'flex';
+        setTimeout(() => {
+          mealPlanModal.classList.add('modal-open');
+        }, 10);
+      });
+    });
+    
+    if (closeMealPlanModalBtn) {
+      closeMealPlanModalBtn.addEventListener('click', function() {
+        mealPlanModal.classList.remove('modal-open');
+        setTimeout(() => {
+          mealPlanModal.style.display = 'none';
+        }, 300);
+      });
+    }
+    
+    window.addEventListener('click', function(event) {
+      if (event.target === mealPlanModal) {
+        mealPlanModal.classList.remove('modal-open');
+        setTimeout(() => {
+          mealPlanModal.style.display = 'none';
+        }, 300);
+      }
+    });
+    
+    // Remove "no meal planned" when adding a recipe (fix for issue #9)
+    const recipeForm = document.querySelector('form[action*="add_recipe"]');
+    if (recipeForm) {
+      recipeForm.addEventListener('submit', function() {
+        const day = document.getElementById('day_of_week').value;
+        const mealType = document.getElementById('meal_type').value;
+        
+        // Find the cell that corresponds to this day and meal type
+        const cell = document.querySelector(`.meal-plan-cell[data-day="${day}"]`);
+        if (cell) {
+          const placeholder = cell.querySelector('.meal-plan-empty');
+          if (placeholder) {
+            placeholder.style.display = 'none';
+          }
+        }
+      });
+    }
+  }
+  
+  // Category filters for inventory
+  const categoryFilters = document.querySelectorAll('.category-filter');
+  const inventoryItems = document.querySelectorAll('.inventory-item');
+  
+  if (categoryFilters.length > 0 && inventoryItems.length > 0) {
+    categoryFilters.forEach(filter => {
+      filter.addEventListener('click', function() {
+        const category = this.getAttribute('data-category');
+        
+        // Toggle active state
+        categoryFilters.forEach(f => f.classList.remove('active'));
+        this.classList.add('active');
+        
+        // Filter items
+        if (category === 'all') {
+          inventoryItems.forEach(item => {
+            item.style.display = 'block';
+          });
+        } else {
+          inventoryItems.forEach(item => {
+            if (item.getAttribute('data-category') === category) {
+              item.style.display = 'block';
+            } else {
+              item.style.display = 'none';
+            }
+          });
+        }
+      });
+    });
+  }
+  
+  // Mobile navigation toggle
+  const mobileMenuToggle = document.getElementById('mobile-menu-toggle');
+  const mobileMenu = document.getElementById('mobile-menu');
+  
+  if (mobileMenuToggle && mobileMenu) {
+    mobileMenuToggle.addEventListener('click', function() {
+      mobileMenu.classList.toggle('show');
+      mobileMenuToggle.classList.toggle('open');
+    });
+  }
+
+  // Ingredient autocomplete - Initialize if on inventory add/edit page
+  const ingredientInput = document.getElementById('ingredient-name-input');
+  const suggestionsContainer = document.getElementById('ingredient-suggestions');
+  const unitSelect = document.getElementById('unit-select');
+  
+  if (ingredientInput && suggestionsContainer && unitSelect) {
+    // Store the ingredient data
+    let ingredientData = [];
+    
+    // Fetch ingredients
+    async function fetchIngredients(searchTerm) {
+      try {
+        const response = await fetch(`/inventory/api/ingredients?term=${searchTerm}`);
+        const data = await response.json();
+        return data.ingredients;
+      } catch (error) {
+        console.error('Error fetching ingredients:', error);
+        return [];
+      }
+    }
+    
+    // Debounce function to prevent too many API calls
+    function debounce(func, wait) {
+      let timeout;
+      return function(...args) {
+        clearTimeout(timeout);
+        timeout = setTimeout(() => func.apply(this, args), wait);
+      };
+    }
+    
+    // Handle input changes
+    const handleInputChange = debounce(async function() {
+      const searchTerm = ingredientInput.value.trim().toLowerCase();
+      
+      if (searchTerm.length < 2) {
+        suggestionsContainer.innerHTML = '';
+        suggestionsContainer.style.display = 'none';
+        return;
+      }
+      
+      // Fetch ingredients that match the search term
+      ingredientData = await fetchIngredients(searchTerm);
+      
+      // Display suggestions
+      if (ingredientData.length > 0) {
+        suggestionsContainer.innerHTML = '';
+        
+        ingredientData.forEach(ingredient => {
+          const div = document.createElement('div');
+          div.className = 'suggestion-item';
+          div.textContent = ingredient.name;
+          div.addEventListener('click', () => selectIngredient(ingredient));
+          suggestionsContainer.appendChild(div);
+        });
+        
+        suggestionsContainer.style.display = 'block';
+      } else {
+        suggestionsContainer.innerHTML = '';
+        suggestionsContainer.style.display = 'none';
+      }
+    }, 300);
+    
+    // Select an ingredient from suggestions
+    function selectIngredient(ingredient) {
+      ingredientInput.value = ingredient.name;
+      
+      // Set the unit if available
+      if (ingredient.unit) {
+        // Find the option with this unit value
+        for (let i = 0; i < unitSelect.options.length; i++) {
+          if (unitSelect.options[i].value === ingredient.unit) {
+            unitSelect.selectedIndex = i;
+            break;
+          }
+        }
+      }
+      
+      // Hide suggestions
+      suggestionsContainer.innerHTML = '';
+      suggestionsContainer.style.display = 'none';
+    }
+    
+    // Add event listeners
+    ingredientInput.addEventListener('input', handleInputChange);
+    
+    // Close suggestions when clicking outside
+    document.addEventListener('click', function(event) {
+      if (event.target !== ingredientInput && event.target !== suggestionsContainer) {
+        suggestionsContainer.style.display = 'none';
+      }
+    });
+  }
+});
+
+// Function to update recipe search results dynamically
+function updateRecipeResults(recipes) {
+  const resultsContainer = document.getElementById('recipe-results');
+  
+  if (!resultsContainer || !recipes) return;
+  
+  let html = '';
+  
+  if (recipes.length === 0) {
+    html = '<p class="text-center">No recipes found matching your criteria.</p>';
+  } else {
+    recipes.forEach(recipe => {
+      html += `
+        <div class="recipe-card card">
+          <img src="/static/images/recipes/${recipe._id}.jpg" onerror="this.src='/static/images/placeholder.jpg'" alt="${recipe.name}" class="card-img">
+          <div class="card-body">
+            <h3 class="card-title">${recipe.name}</h3>
+            <p class="card-text">${recipe.description}</p>
+            <div class="recipe-meta">
+              <span>${recipe.prep_time + recipe.cook_time} mins</span>
+              <span>${recipe.difficulty}</span>
+            </div>
+            <div class="match-indicator">
+              <div class="match-bar" data-percentage="${recipe.match_percentage || 0}">
+                <div class="match-progress" style="width: 0%"></div>
+              </div>
+              <span class="match-text">${Math.round(recipe.match_percentage || 0)}%</span>
+            </div>
+            <div class="recipe-tags">
+              ${recipe.tags.map(tag => `<span class="recipe-tag">${tag}</span>`).join('')}
+            </div>
+            <a href="/recipe/${recipe._id}" class="btn btn-primary mt-2">View Recipe</a>
+          </div>
+        </div>
+      `;
+    });
+  }
+  
+  resultsContainer.innerHTML = html;
+  
+  // Initialize match bars after updating content
+  const matchBars = document.querySelectorAll('.match-bar');
+  matchBars.forEach(bar => {
+    const percentage = parseFloat(bar.getAttribute('data-percentage'));
+    const progressBar = bar.querySelector('.match-progress');
+    
+    setTimeout(() => {
+      progressBar.style.width = `${percentage}%`;
+      
+      // Set color based on match percentage
+      if (percentage >= 80) {
+        progressBar.style.backgroundColor = 'var(--success)';
+      } else if (percentage >= 50) {
+        progressBar.style.backgroundColor = 'var(--sage-green)';
+      } else if (percentage >= 30) {
+        progressBar.style.backgroundColor = 'var(--warning)';
+      } else {
+        progressBar.style.backgroundColor = 'var(--terracotta)';
+      }
+    }, 100);
+  });
+}

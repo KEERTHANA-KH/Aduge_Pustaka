@@ -2830,3 +2830,36 @@ function updateRecipeResults(recipes) {
     }, 100);
   });
 }
+
+********†*************************
+
+{% extends "base.html" %}
+
+{% block title %}CookBookIt - Delete Account{% endblock %}
+
+{% block content %}
+<div class="slide-in-up">
+    <h1 class="mb-4">Delete Account</h1>
+    
+    <div class="card">
+        <div class="card-body">
+            <div class="alert alert-danger">
+                <h4>Warning!</h4>
+                <p>This action cannot be undone. All your data, including inventory, meal plans, and completed recipes, will be permanently deleted.</p>
+            </div>
+            
+            <form method="POST" action="{{ url_for('auth.delete_account') }}">
+                <div class="form-group">
+                    <label class="form-label" for="password">Enter your password to confirm</label>
+                    <input type="password" id="password" name="password" class="form-control" required>
+                </div>
+                
+                <div class="d-flex justify-content-between mt-4">
+                    <a href="{{ url_for('auth.profile') }}" class="btn btn-outline">Cancel</a>
+                    <button type="submit" class="btn btn-danger">Delete My Account</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
